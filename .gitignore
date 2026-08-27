@@ -1,0 +1,15 @@
+.DS_Store
+__pycache__/
+build/
+.Xil/
+*.jou
+*.log
+*.pb
+*.wdb
+*.str
+*.dcp
+*.bit
+*.ltx
+*.rpt
+*.zip
+*.rar
