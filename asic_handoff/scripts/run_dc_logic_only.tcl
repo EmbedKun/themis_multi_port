@@ -41,7 +41,7 @@ set batch_slots [env_or HESTIA_ASIC_BATCH_SLOTS 8388608]
 set packet_slots [env_or HESTIA_ASIC_PACKET_SLOTS 81920]
 set bbq_bitmap_width [env_or HESTIA_ASIC_BBQ_BITMAP_WIDTH 32]
 set policy_alpha_shift [env_or HESTIA_ASIC_POLICY_ALPHA_SHIFT 0]
-set sdc_file [env_or HESTIA_ASIC_SDC [file join $handoff_dir constraints hestia_300mhz.sdc]]
+set sdc_file [env_or HESTIA_ASIC_SDC [file join $handoff_dir constraints hestia_1ghz.sdc]]
 set report_dir [env_or HESTIA_ASIC_REPORT_DIR [file join $repo_dir build dc_asic_logic_only]]
 file mkdir $report_dir
 

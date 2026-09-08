@@ -83,7 +83,7 @@ if {[llength $argv] > 0} {
 if {[llength $argv] > 1} {
   set clk_period_ns [lindex $argv 1]
 } else {
-  set clk_period_ns [env_or HESTIA_ASIC_CLK_PERIOD_NS 3.333]
+  set clk_period_ns [env_or HESTIA_ASIC_CLK_PERIOD_NS 1.000]
 }
 file mkdir $build_root
 
