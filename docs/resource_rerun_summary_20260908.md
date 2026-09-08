@@ -46,18 +46,22 @@ on-chip metadata entry for every possible off-chip batch.
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | DT-Hybrid | 1 | 5893 | 1325 | 0 | 391 | 160 | -0.354 |
 | Hestia | 1 | 6275 | 1446 | 0 | 391 | 160 | -0.728 |
+| Hybrid-Themis | 1 | 6271 | 1396 | 0 | 391 | 160 | -1.951 |
 | OBM-Hybrid | 1 | 6116 | 1463 | 0 | 391 | 160 | -0.427 |
 | Occamy-Hybrid | 1 | 6187 | 1463 | 0 | 391 | 160 | -0.811 |
 | DT-Hybrid | 2 | 6780 | 1928 | 0 | 391 | 160 | -1.923 |
 | Hestia | 2 | 7000 | 1902 | 0 | 391 | 160 | -1.748 |
+| Hybrid-Themis | 2 | 7579 | 2046 | 0 | 391 | 160 | -3.241 |
 | OBM-Hybrid | 2 | 6800 | 1928 | 0 | 391 | 160 | -2.299 |
 | Occamy-Hybrid | 2 | 6863 | 1928 | 0 | 391 | 160 | -2.421 |
 | DT-Hybrid | 4 | 8588 | 2794 | 0 | 401 | 160 | -2.197 |
 | Hestia | 4 | 9238 | 2781 | 0 | 401 | 160 | -5.072 |
+| Hybrid-Themis | 4 | 10338 | 3074 | 0 | 401 | 160 | -7.009 |
 | OBM-Hybrid | 4 | 9104 | 2862 | 0 | 401 | 160 | -4.390 |
 | Occamy-Hybrid | 4 | 9119 | 2862 | 0 | 401 | 160 | -4.543 |
 | DT-Hybrid | 8 | 12664 | 4734 | 0 | 401 | 160 | -8.937 |
 | Hestia | 8 | 14221 | 4548 | 0 | 401 | 160 | -11.120 |
+| Hybrid-Themis | 8 | 15842 | 5124 | 0 | 401 | 160 | -13.690 |
 | OBM-Hybrid | 8 | 15719 | 5147 | 0 | 401 | 160 | -9.723 |
 | Occamy-Hybrid | 8 | 13127 | 4732 | 0 | 401 | 160 | -9.331 |
 
@@ -79,4 +83,11 @@ To rerun only one resource boundary:
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\rerun_resource_sweeps.ps1 -Mode compact
 powershell -ExecutionPolicy Bypass -File scripts\rerun_resource_sweeps.ps1 -Mode fullscale
+```
+
+On Linux Vivado hosts:
+
+```bash
+bash scripts/rerun_resource_sweeps.sh both
+HESTIA_SWEEP_DESIGNS=hybrid_themis bash scripts/rerun_resource_sweeps.sh fullscale
 ```
