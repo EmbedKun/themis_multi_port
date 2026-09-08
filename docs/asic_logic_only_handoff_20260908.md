@@ -30,24 +30,24 @@ timing/power libraries.
 Command:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File asic_handoff\scripts\run_vivado_logic_only_sweep.ps1 -PortsList 4 -ClockPeriodNs 3.333
+powershell -ExecutionPolicy Bypass -File asic_handoff\scripts\run_vivado_logic_only_sweep.ps1 -ClockPeriodNs 1.000
 ```
 
 Output directory:
 
 ```text
-build/asic_logic_only_20260908_195619
+build/asic_logic_only_20260908_202647
 ```
 
 Results:
 
 | Design | Ports | CLB LUTs | CLB Registers | LUTRAM | BRAM | URAM | DSP | WNS ns | Black-box memories |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| DT-Hybrid | 4 | 4226 | 2789 | 0 | 0 | 0 | 0 | -2.198 | 5 |
-| Hestia | 4 | 4768 | 2708 | 0 | 0 | 0 | 0 | -4.833 | 5 |
-| Hybrid-Themis | 4 | 5756 | 2998 | 0 | 0 | 0 | 0 | -6.660 | 5 |
-| OBM-Hybrid | 4 | 4552 | 2789 | 0 | 0 | 0 | 0 | -4.202 | 5 |
-| Occamy-Hybrid | 4 | 4557 | 2789 | 0 | 0 | 0 | 0 | -3.315 | 5 |
+| DT-Hybrid | 4 | 4272 | 2789 | 0 | 0 | 0 | 0 | -4.646 | 5 |
+| Hestia | 4 | 4948 | 2708 | 0 | 0 | 0 | 0 | -7.182 | 5 |
+| Hybrid-Themis | 4 | 6105 | 2998 | 0 | 0 | 0 | 0 | -9.123 | 5 |
+| OBM-Hybrid | 4 | 4343 | 2789 | 0 | 0 | 0 | 0 | -6.354 | 5 |
+| Occamy-Hybrid | 4 | 4358 | 2789 | 0 | 0 | 0 | 0 | -5.628 | 5 |
 
 The unresolved-memory critical warning in this smoke run is expected: the
 memory instances are deliberately left as black boxes. The Vivado WNS values

@@ -1,7 +1,7 @@
 param(
   [string]$VivadoPath = "D:\Xilinx\Vivado\2020.2\bin\vivado.bat",
   [string]$ClockPeriodNs = "1.000",
-  [int[]]$PortsList = @(1, 2, 4, 8),
+  [int[]]$PortsList = @(4),
   [string]$Designs = "all"
 )
 

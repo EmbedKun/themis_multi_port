@@ -10,7 +10,7 @@ Report these data:
 - Area: combinational area, sequential area, total cell area.
 - Timing: WNS/TNS and achieved frequency.
 - Power: internal, switching, leakage, and total power.
-- Matrix: five schemes x 1/2/4/8 ports.
+- Matrix: five schemes x 4 ports.
 
 Default target clock: `1.000 ns` / `1 GHz`.
 
@@ -80,7 +80,7 @@ build/dc_hestia_4p_1ghz/hestia_asic_core_mapped.v
 
 ## Run All Schemes
 
-Run the full default matrix:
+Run the default 4-port comparison:
 
 ```bash
 export TARGET_LIBRARY="/path/to/stdcell_28nm.db"
@@ -92,8 +92,7 @@ bash asic_handoff/scripts/run_dc_logic_only_sweep.sh
 Useful overrides:
 
 ```bash
-# Only run 4-port Hestia and Hybrid-Themis.
-HESTIA_ASIC_PORTS_LIST="4" \
+# Only run Hestia and Hybrid-Themis.
 HESTIA_ASIC_SWEEP_DESIGNS="hestia,hybrid_themis" \
 bash asic_handoff/scripts/run_dc_logic_only_sweep.sh
 

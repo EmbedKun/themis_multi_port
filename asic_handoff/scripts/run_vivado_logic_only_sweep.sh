@@ -8,7 +8,7 @@ vivado_bin="${VIVADO_BIN:-vivado}"
 clk_period_ns="${HESTIA_ASIC_CLK_PERIOD_NS:-1.000}"
 stamp="$(date +%Y%m%d_%H%M%S)"
 run_root="${1:-${repo_dir}/build/asic_logic_only_${stamp}}"
-ports_list="${HESTIA_ASIC_PORTS_LIST:-1 2 4 8}"
+ports_list="${HESTIA_ASIC_PORTS_LIST:-4}"
 design_filter="${HESTIA_ASIC_SWEEP_DESIGNS:-all}"
 
 mkdir -p "${run_root}"
