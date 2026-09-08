@@ -151,6 +151,28 @@ module hestia_paper_scale_port_queue #(
     end
   endfunction
 
+  function automatic logic [PIPE_W-1:0] fold_digest_to_pipe(
+    input logic [63:0] digest_i
+  );
+    begin
+      fold_digest_to_pipe = '0;
+      for (int bi = 0; bi < PIPE_W; bi = bi + 1) begin
+        fold_digest_to_pipe[bi] = digest_i[bi % 64];
+      end
+    end
+  endfunction
+
+  function automatic logic [63:0] fold_pipe_to_digest(
+    input logic [PIPE_W-1:0] pipe_i
+  );
+    begin
+      fold_pipe_to_digest = '0;
+      for (int bi = 0; bi < PIPE_W; bi = bi + 1) begin
+        fold_pipe_to_digest[bi % 64] = fold_pipe_to_digest[bi % 64] ^ pipe_i[bi];
+      end
+    end
+  endfunction
+
   assign sram_occupancy = sram_occ_q;
   assign ddr_occupancy = ddr_occ_q;
 
@@ -208,7 +230,7 @@ module hestia_paper_scale_port_queue #(
       valid_pipe_q <= {valid_pipe_q[9:0], op_valid};
       pipe_q[0] <= in_word;
       for (stage = 1; stage < 11; stage = stage + 1) begin
-        pipe_q[stage] <= pipe_q[stage-1] ^ {{(PIPE_W-64){1'b0}}, digest};
+        pipe_q[stage] <= pipe_q[stage-1] ^ fold_digest_to_pipe(digest);
       end
 
       sram_l1_min_idx_q <= find_first(sram_l1_q);
@@ -310,12 +332,13 @@ module hestia_paper_scale_port_queue #(
             ddr_min_batch_off <= op_batch_off;
           end
           default: begin
-            digest <= digest ^ pipe_q[10][63:0] ^ {58'd0, sram_l1_min_idx_q, ddr_l1_min_idx_q};
+            digest <= digest ^ fold_pipe_to_digest(pipe_q[10]) ^
+                      {58'd0, sram_l1_min_idx_q, ddr_l1_min_idx_q};
           end
         endcase
       end
 
-      digest <= digest ^ pipe_q[10][63:0] ^
+      digest <= digest ^ fold_pipe_to_digest(pipe_q[10]) ^
                 {{(64-RANK_WIDTH){1'b0}}, sram_min_rank} ^
                 {{(64-RANK_WIDTH){1'b0}}, ddr_min_rank} ^
                 {{(64-OCC_WIDTH){1'b0}}, sram_occ_q};

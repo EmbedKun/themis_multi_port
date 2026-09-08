@@ -24,6 +24,11 @@ scripts/
 
 docs/
   Reproducibility notes and resource-accounting summaries.
+
+asic_handoff/
+  Logic-only ASIC PPA handoff top, filelist, SDC constraints, and synthesis
+  templates. SRAM macros and the external DDR subsystem are excluded from the
+  default core-only synthesis boundary.
 ```
 
 ## Architecture
@@ -58,6 +63,7 @@ Themis terminology was HBM-oriented. In this U200 build those paths map to DDR4.
 | `rtl/hestia_core_ddr_bbq.sv` | Main descriptor-based, DDR-backed shared-buffer core with per-port BBQ queues. |
 | `rtl/hestia_core_ddr_bbq_extmeta.sv` | Memory-backed resource-core variant for large SRAM/DDR capacity accounting. |
 | `rtl/hestia_resource_core.sv` | Core-only synthesis wrapper used for Hestia and DDR-aware baselines. |
+| `rtl/hestia_asic_core.sv` | ASIC logic-only handoff top with SRAM macro black boxes and an AXI-style DDR boundary. |
 | `rtl/hestia_port_bbq.sv` | Per-port two-level bitmap queue for SRAM/off-chip min/max selection. |
 | `rtl/hestia_policy_dt.sv` | Dynamic-threshold baseline policy. |
 | `rtl/hestia_policy_occamy.sv` | Occamy-style threshold/reclaim baseline policy. |

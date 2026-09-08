@@ -2,6 +2,21 @@
 
 import hestia_pkg::*;
 
+(* black_box = "true", syn_black_box = 1 *)
+module hestia_asic_sram_1r1w #(
+  parameter int DATA_W = 64,
+  parameter int ADDR_W = 12,
+  parameter int DEPTH = 4096
+) (
+  input  logic                  clk,
+  input  logic                  we,
+  input  logic [ADDR_W-1:0]     wr_addr,
+  input  logic [DATA_W-1:0]     wr_data,
+  input  logic [ADDR_W-1:0]     rd_addr,
+  output logic [DATA_W-1:0]     rd_data
+);
+endmodule
+
 (* keep_hierarchy = "yes" *)
 module hestia_bram_bank_sdp #(
   parameter int DATA_W = 64,
@@ -52,6 +67,7 @@ module hestia_bram_banked_sdp #(
   parameter int DATA_W = 64,
   parameter int TOTAL_DEPTH = 81920,
   parameter int BANK_DEPTH = 4096,
+  parameter bit USE_ASIC_MEMORY_MACROS = 1'b0,
   localparam int ADDR_W = (TOTAL_DEPTH <= 2) ? 1 : $clog2(TOTAL_DEPTH),
   localparam int BANKS = (TOTAL_DEPTH + BANK_DEPTH - 1) / BANK_DEPTH,
   localparam int BANK_W = (BANKS <= 2) ? 1 : $clog2(BANKS),
@@ -64,54 +80,69 @@ module hestia_bram_banked_sdp #(
   input  logic [ADDR_W-1:0]            rd_addr,
   output logic [DATA_W-1:0]            rd_data
 );
-  logic [BANK_W-1:0] wr_bank_c;
-  logic [BANK_W-1:0] rd_bank_c;
-  logic [BANK_W-1:0] rd_bank_q;
-  logic [BANK_ADDR_W-1:0] wr_local_c;
-  logic [BANK_ADDR_W-1:0] rd_local_c;
-  logic [BANKS*DATA_W-1:0] bank_rd_data;
-
-  always_comb begin
-    if (BANKS <= 1) begin
-      wr_bank_c = '0;
-      rd_bank_c = '0;
-    end else begin
-      wr_bank_c = BANK_W'(int'(wr_addr) / BANK_DEPTH);
-      rd_bank_c = BANK_W'(int'(rd_addr) / BANK_DEPTH);
-    end
-    wr_local_c = BANK_ADDR_W'(int'(wr_addr) % BANK_DEPTH);
-    rd_local_c = BANK_ADDR_W'(int'(rd_addr) % BANK_DEPTH);
-  end
-
-  genvar gb;
   generate
-    for (gb = 0; gb < BANKS; gb = gb + 1) begin : gen_bram_bank
-      hestia_bram_bank_sdp #(
+    if (USE_ASIC_MEMORY_MACROS) begin : gen_asic_macro
+      hestia_asic_sram_1r1w #(
         .DATA_W(DATA_W),
-        .BANK_DEPTH(BANK_DEPTH)
-      ) bank (
+        .ADDR_W(ADDR_W),
+        .DEPTH(TOTAL_DEPTH)
+      ) macro (
         .clk(clk),
-        .we(wr_valid && (wr_bank_c == BANK_W'(gb))),
-        .wr_addr(wr_local_c),
+        .we(wr_valid),
+        .wr_addr(wr_addr),
         .wr_data(wr_data),
-        .rd_addr(rd_local_c),
-        .rd_data(bank_rd_data[gb*DATA_W +: DATA_W])
+        .rd_addr(rd_addr),
+        .rd_data(rd_data)
       );
-    end
-  endgenerate
+    end else begin : gen_fpga_banked_memory
+      logic [BANK_W-1:0] wr_bank_c;
+      logic [BANK_W-1:0] rd_bank_c;
+      logic [BANK_W-1:0] rd_bank_q;
+      logic [BANK_ADDR_W-1:0] wr_local_c;
+      logic [BANK_ADDR_W-1:0] rd_local_c;
+      logic [BANKS*DATA_W-1:0] bank_rd_data;
 
-  always_ff @(posedge clk) begin
-    rd_bank_q <= rd_bank_c;
-  end
+      always_comb begin
+        if (BANKS <= 1) begin
+          wr_bank_c = '0;
+          rd_bank_c = '0;
+        end else begin
+          wr_bank_c = BANK_W'(int'(wr_addr) / BANK_DEPTH);
+          rd_bank_c = BANK_W'(int'(rd_addr) / BANK_DEPTH);
+        end
+        wr_local_c = BANK_ADDR_W'(int'(wr_addr) % BANK_DEPTH);
+        rd_local_c = BANK_ADDR_W'(int'(rd_addr) % BANK_DEPTH);
+      end
 
-  always_comb begin
-    rd_data = '0;
-    for (int bi = 0; bi < BANKS; bi = bi + 1) begin
-      if (rd_bank_q == BANK_W'(bi)) begin
-        rd_data = bank_rd_data[bi*DATA_W +: DATA_W];
+      genvar gb;
+      for (gb = 0; gb < BANKS; gb = gb + 1) begin : gen_bram_bank
+        hestia_bram_bank_sdp #(
+          .DATA_W(DATA_W),
+          .BANK_DEPTH(BANK_DEPTH)
+        ) bank (
+          .clk(clk),
+          .we(wr_valid && (wr_bank_c == BANK_W'(gb))),
+          .wr_addr(wr_local_c),
+          .wr_data(wr_data),
+          .rd_addr(rd_local_c),
+          .rd_data(bank_rd_data[gb*DATA_W +: DATA_W])
+        );
+      end
+
+      always_ff @(posedge clk) begin
+        rd_bank_q <= rd_bank_c;
+      end
+
+      always_comb begin
+        rd_data = '0;
+        for (int bi = 0; bi < BANKS; bi = bi + 1) begin
+          if (rd_bank_q == BANK_W'(bi)) begin
+            rd_data = bank_rd_data[bi*DATA_W +: DATA_W];
+          end
+        end
       end
     end
-  end
+  endgenerate
 endmodule
 
 (* keep_hierarchy = "yes" *)
@@ -120,6 +151,7 @@ module hestia_payload_sram_banked #(
   parameter int CELL_W = 512,
   parameter int LANE_W = 64,
   parameter int BANK_DEPTH = 4096,
+  parameter bit USE_ASIC_MEMORY_MACROS = 1'b0,
   localparam int ADDR_W = (TOTAL_CELLS <= 2) ? 1 : $clog2(TOTAL_CELLS),
   localparam int LANES = CELL_W / LANE_W,
   localparam int BANKS = (TOTAL_CELLS + BANK_DEPTH - 1) / BANK_DEPTH,
@@ -133,56 +165,71 @@ module hestia_payload_sram_banked #(
   input  logic [ADDR_W-1:0]            rd_addr,
   output logic [CELL_W-1:0]            rd_data
 );
-  logic [BANK_W-1:0] wr_bank_c;
-  logic [BANK_W-1:0] rd_bank_c;
-  logic [BANK_W-1:0] rd_bank_q;
-  logic [BANK_ADDR_W-1:0] wr_local_c;
-  logic [BANK_ADDR_W-1:0] rd_local_c;
-  logic [BANKS*CELL_W-1:0] bank_rd_data;
-
-  always_comb begin
-    if (BANKS <= 1) begin
-      wr_bank_c = '0;
-      rd_bank_c = '0;
-    end else begin
-      wr_bank_c = BANK_W'(int'(wr_addr) / BANK_DEPTH);
-      rd_bank_c = BANK_W'(int'(rd_addr) / BANK_DEPTH);
-    end
-    wr_local_c = BANK_ADDR_W'(int'(wr_addr) % BANK_DEPTH);
-    rd_local_c = BANK_ADDR_W'(int'(rd_addr) % BANK_DEPTH);
-  end
-
-  genvar gb;
-  genvar gl;
   generate
-    for (gb = 0; gb < BANKS; gb = gb + 1) begin : gen_payload_bank
-      for (gl = 0; gl < LANES; gl = gl + 1) begin : gen_payload_lane
-        hestia_uram_bank64_sdp #(
-          .BANK_DEPTH(BANK_DEPTH)
-        ) bank_lane (
-          .clk(clk),
-          .we(wr_valid && (wr_bank_c == BANK_W'(gb))),
-          .wr_addr(wr_local_c),
-          .wr_data(wr_data[gl*LANE_W +: LANE_W]),
-          .rd_addr(rd_local_c),
-          .rd_data(bank_rd_data[gb*CELL_W + gl*LANE_W +: LANE_W])
-        );
+    if (USE_ASIC_MEMORY_MACROS) begin : gen_asic_macro
+      hestia_asic_sram_1r1w #(
+        .DATA_W(CELL_W),
+        .ADDR_W(ADDR_W),
+        .DEPTH(TOTAL_CELLS)
+      ) macro (
+        .clk(clk),
+        .we(wr_valid),
+        .wr_addr(wr_addr),
+        .wr_data(wr_data),
+        .rd_addr(rd_addr),
+        .rd_data(rd_data)
+      );
+    end else begin : gen_fpga_banked_memory
+      logic [BANK_W-1:0] wr_bank_c;
+      logic [BANK_W-1:0] rd_bank_c;
+      logic [BANK_W-1:0] rd_bank_q;
+      logic [BANK_ADDR_W-1:0] wr_local_c;
+      logic [BANK_ADDR_W-1:0] rd_local_c;
+      logic [BANKS*CELL_W-1:0] bank_rd_data;
+
+      always_comb begin
+        if (BANKS <= 1) begin
+          wr_bank_c = '0;
+          rd_bank_c = '0;
+        end else begin
+          wr_bank_c = BANK_W'(int'(wr_addr) / BANK_DEPTH);
+          rd_bank_c = BANK_W'(int'(rd_addr) / BANK_DEPTH);
+        end
+        wr_local_c = BANK_ADDR_W'(int'(wr_addr) % BANK_DEPTH);
+        rd_local_c = BANK_ADDR_W'(int'(rd_addr) % BANK_DEPTH);
+      end
+
+      genvar gb;
+      genvar gl;
+      for (gb = 0; gb < BANKS; gb = gb + 1) begin : gen_payload_bank
+        for (gl = 0; gl < LANES; gl = gl + 1) begin : gen_payload_lane
+          hestia_uram_bank64_sdp #(
+            .BANK_DEPTH(BANK_DEPTH)
+          ) bank_lane (
+            .clk(clk),
+            .we(wr_valid && (wr_bank_c == BANK_W'(gb))),
+            .wr_addr(wr_local_c),
+            .wr_data(wr_data[gl*LANE_W +: LANE_W]),
+            .rd_addr(rd_local_c),
+            .rd_data(bank_rd_data[gb*CELL_W + gl*LANE_W +: LANE_W])
+          );
+        end
+      end
+
+      always_ff @(posedge clk) begin
+        rd_bank_q <= rd_bank_c;
+      end
+
+      always_comb begin
+        rd_data = '0;
+        for (int bi = 0; bi < BANKS; bi = bi + 1) begin
+          if (rd_bank_q == BANK_W'(bi)) begin
+            rd_data = bank_rd_data[bi*CELL_W +: CELL_W];
+          end
+        end
       end
     end
   endgenerate
-
-  always_ff @(posedge clk) begin
-    rd_bank_q <= rd_bank_c;
-  end
-
-  always_comb begin
-    rd_data = '0;
-    for (int bi = 0; bi < BANKS; bi = bi + 1) begin
-      if (rd_bank_q == BANK_W'(bi)) begin
-        rd_data = bank_rd_data[bi*CELL_W +: CELL_W];
-      end
-    end
-  end
 endmodule
 
 module hestia_extmeta_tables #(
@@ -201,6 +248,7 @@ module hestia_extmeta_tables #(
   parameter int BATCH_SIZE = 8,
   parameter int ACTIVE_BATCH_SLOTS = 4096,
   parameter int PAYLOAD_CELL_WIDTH = 512,
+  parameter bit USE_ASIC_MEMORY_MACROS = 1'b0,
   localparam int DESC_WORD_W = 1 + PORT_W + RANK_WIDTH + SEQ_WIDTH +
                                CELL_COUNT_WIDTH + PAYLOAD_WIDTH +
                                SRAM_SLOT_W + BATCH_ID_W + BATCH_OFF_W,
@@ -390,7 +438,8 @@ module hestia_extmeta_tables #(
   hestia_bram_banked_sdp #(
     .DATA_W(DESC_WORD_W),
     .TOTAL_DEPTH(PACKET_SLOTS),
-    .BANK_DEPTH(4096)
+    .BANK_DEPTH(4096),
+    .USE_ASIC_MEMORY_MACROS(USE_ASIC_MEMORY_MACROS)
   ) desc_table (
     .clk(clk),
     .wr_valid(desc_wr_valid),
@@ -403,7 +452,8 @@ module hestia_extmeta_tables #(
   hestia_bram_banked_sdp #(
     .DATA_W(DESC_W),
     .TOTAL_DEPTH(PACKET_SLOTS),
-    .BANK_DEPTH(4096)
+    .BANK_DEPTH(4096),
+    .USE_ASIC_MEMORY_MACROS(USE_ASIC_MEMORY_MACROS)
   ) desc_free_list (
     .clk(clk),
     .wr_valid(desc_free_valid),
@@ -416,7 +466,8 @@ module hestia_extmeta_tables #(
   hestia_bram_banked_sdp #(
     .DATA_W(SRAM_SLOT_W),
     .TOTAL_DEPTH(SRAM_CELLS),
-    .BANK_DEPTH(4096)
+    .BANK_DEPTH(4096),
+    .USE_ASIC_MEMORY_MACROS(USE_ASIC_MEMORY_MACROS)
   ) sram_free_list (
     .clk(clk),
     .wr_valid(sram_release_valid),
@@ -429,7 +480,8 @@ module hestia_extmeta_tables #(
   hestia_bram_banked_sdp #(
     .DATA_W(ACTIVE_WORD_W),
     .TOTAL_DEPTH(ACTIVE_DEPTH),
-    .BANK_DEPTH(4096)
+    .BANK_DEPTH(4096),
+    .USE_ASIC_MEMORY_MACROS(USE_ASIC_MEMORY_MACROS)
   ) active_batch_window (
     .clk(clk),
     .wr_valid(batch_append_valid || batch_commit_valid || batch_release_valid),
@@ -443,7 +495,8 @@ module hestia_extmeta_tables #(
     .TOTAL_CELLS(SRAM_CELLS),
     .CELL_W(PAYLOAD_CELL_WIDTH),
     .LANE_W(64),
-    .BANK_DEPTH(4096)
+    .BANK_DEPTH(4096),
+    .USE_ASIC_MEMORY_MACROS(USE_ASIC_MEMORY_MACROS)
   ) sram_payload (
     .clk(clk),
     .wr_valid(desc_wr_valid && !desc_wr_loc),
@@ -503,6 +556,7 @@ module hestia_core_ddr_bbq_extmeta #(
   parameter int POLICY_ALPHA_SHIFT = 0,
   parameter int POLICY_ALPHA_SHIFT_WIDTH = 4,
   parameter bit ENABLE_DDR_META_CHECK = 1'b0,
+  parameter bit USE_ASIC_MEMORY_MACROS = 1'b0,
   parameter logic [AXI_ADDR_WIDTH-1:0] DDR_BASE_ADDR = 64'h0,
   localparam int PORT_W = (PORTS <= 2) ? 1 : $clog2(PORTS),
   localparam int SRAM_SLOT_W = (SRAM_CELLS <= 2) ? 1 : $clog2(SRAM_CELLS),
@@ -1067,7 +1121,8 @@ module hestia_core_ddr_bbq_extmeta #(
     .PACKET_SLOTS(PACKET_SLOTS),
     .BATCH_SIZE(BATCH_SIZE),
     .ACTIVE_BATCH_SLOTS(4096),
-    .PAYLOAD_CELL_WIDTH(AXI_DATA_WIDTH)
+    .PAYLOAD_CELL_WIDTH(AXI_DATA_WIDTH),
+    .USE_ASIC_MEMORY_MACROS(USE_ASIC_MEMORY_MACROS)
   ) meta_tables (
     .clk(clk),
     .resetn(resetn),

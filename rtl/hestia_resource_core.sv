@@ -24,6 +24,7 @@ module hestia_resource_core #(
   parameter int POLICY_ALPHA_SHIFT_WIDTH = 4,
   parameter bit EXTERNAL_METADATA = 1'b0,
   parameter bit ENABLE_DDR_META_CHECK = 1'b0,
+  parameter bit USE_ASIC_MEMORY_MACROS = 1'b0,
   parameter logic [AXI_ADDR_WIDTH-1:0] DDR_BASE_ADDR = 64'h0,
   localparam int PORT_W = (PORTS <= 2) ? 1 : $clog2(PORTS),
   localparam int AXI_KEEP_WIDTH = AXI_DATA_WIDTH / 8
@@ -109,6 +110,7 @@ module hestia_resource_core #(
         .POLICY_ALPHA_SHIFT(POLICY_ALPHA_SHIFT),
         .POLICY_ALPHA_SHIFT_WIDTH(POLICY_ALPHA_SHIFT_WIDTH),
         .ENABLE_DDR_META_CHECK(ENABLE_DDR_META_CHECK),
+        .USE_ASIC_MEMORY_MACROS(USE_ASIC_MEMORY_MACROS),
         .DDR_BASE_ADDR(DDR_BASE_ADDR)
       ) core (
         .clk(clk),

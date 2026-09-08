@@ -58,6 +58,18 @@ module hestia_policy_hybrid_themis #(
     end
   endfunction
 
+  function automatic logic [15:0] low16_occ(
+    input logic [OCC_WIDTH-1:0] value_i
+  );
+    begin
+      if (OCC_WIDTH >= 16) begin
+        low16_occ = value_i[15:0];
+      end else begin
+        low16_occ = {{(16-OCC_WIDTH){1'b0}}, value_i};
+      end
+    end
+  endfunction
+
   integer pi;
   integer si;
   integer idx;
@@ -104,13 +116,13 @@ module hestia_policy_hybrid_themis #(
                 (free_cells >= cells) &&
                 (sat_add_occ(pkt_sram_occ, cells) <= pkt_effective_threshold);
 
-    digest = {48'd0, threshold[15:0]};
+    digest = {48'd0, low16_occ(threshold)};
     for (pi = 0; pi < PORTS; pi = pi + 1) begin
       digest = digest ^
-               ({48'd0, sram_occ_v[pi][15:0]} << (pi % 8)) ^
-               ({48'd0, ddr_occ_v[pi][15:0]} << ((pi + 3) % 8)) ^
-               ({48'd0, local_target_q[pi][15:0]} << ((pi + 5) % 8)) ^
-               ({48'd0, local_total_q[pi][15:0]} << ((pi + 7) % 8)) ^
+               ({48'd0, low16_occ(sram_occ_v[pi])} << (pi % 8)) ^
+               ({48'd0, low16_occ(ddr_occ_v[pi])} << ((pi + 3) % 8)) ^
+               ({48'd0, low16_occ(local_target_q[pi])} << ((pi + 5) % 8)) ^
+               ({48'd0, low16_occ(local_total_q[pi])} << ((pi + 7) % 8)) ^
                (64'(pi) << 2) ^
                {62'd0, local_pressure_q[pi], local_has_ddr_q[pi]};
     end
