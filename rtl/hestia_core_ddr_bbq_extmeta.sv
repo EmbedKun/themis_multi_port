@@ -606,6 +606,7 @@ module hestia_core_ddr_bbq_extmeta #(
   localparam int POLICY_OCCAMY_HEAD = 1;
   localparam int POLICY_OCCAMY_MAX = 2;
   localparam int POLICY_OBM = 3;
+  localparam int POLICY_HYBRID_THEMIS = 4;
   localparam logic [COUNT_W-1:0] SRAM_CELLS_COUNT = SRAM_CELLS;
   localparam logic [COUNT_W-1:0] DDR_CELL_CAPACITY_COUNT = DDR_CELL_CAPACITY;
   localparam logic [COUNT_W-1:0] PACKET_SLOTS_COUNT = PACKET_SLOTS;
@@ -702,6 +703,16 @@ module hestia_core_ddr_bbq_extmeta #(
   logic [PORT_W-1:0] obm_longest_port_c;
   logic [COUNT_W-1:0] obm_longest_occ_c;
   logic obm_pkt_targets_longest_c;
+  logic hybrid_policy_admit_c;
+  logic [COUNT_W-1:0] hybrid_policy_threshold_c;
+  logic [PORTS-1:0] hybrid_over_threshold_c;
+  logic [PORTS-1:0] hybrid_under_threshold_c;
+  logic hybrid_swapout_hint_valid_c;
+  logic [PORT_W-1:0] hybrid_swapout_hint_port_c;
+  logic hybrid_swapin_hint_valid_c;
+  logic [PORT_W-1:0] hybrid_swapin_hint_port_c;
+  logic [63:0] hybrid_policy_digest_c;
+  logic [63:0] selected_policy_digest_c;
 
   logic ingress_fire_c;
   logic ingress_to_sram_c;
@@ -839,6 +850,18 @@ module hestia_core_ddr_bbq_extmeta #(
   );
     begin
       cell_count_count = {{(COUNT_W-CELL_COUNT_WIDTH){1'b0}}, cells_i};
+    end
+  endfunction
+
+  function automatic logic count_after_add_leq(
+    input logic [COUNT_W-1:0] a_i,
+    input logic [COUNT_W-1:0] b_i,
+    input logic [COUNT_W-1:0] limit_i
+  );
+    logic [COUNT_W:0] sum_v;
+    begin
+      sum_v = {1'b0, a_i} + {1'b0, b_i};
+      count_after_add_leq = !sum_v[COUNT_W] && (sum_v[COUNT_W-1:0] <= limit_i);
     end
   endfunction
 
@@ -1000,6 +1023,35 @@ module hestia_core_ddr_bbq_extmeta #(
     .pkt_targets_longest(obm_pkt_targets_longest_c)
   );
 
+  hestia_policy_hybrid_themis #(
+    .PORTS(PORTS),
+    .CELL_COUNT_WIDTH(CELL_COUNT_WIDTH),
+    .OCC_WIDTH(COUNT_W),
+    .ALPHA_SHIFT_WIDTH(POLICY_ALPHA_SHIFT_WIDTH)
+  ) hybrid_themis_policy (
+    .clk(clk),
+    .resetn(resetn),
+    .cfg_alpha_shift(POLICY_ALPHA_SHIFT_VALUE),
+    .pkt_valid(s_pkt_valid),
+    .pkt_port(s_pkt_port),
+    .pkt_cell_count(s_pkt_cell_count),
+    .free_cells(sram_free_count_q),
+    .sram_occ_flat(policy_sram_occ_flat_c),
+    .ddr_occ_flat(hbm_occ_flat),
+    .pkt_admit(hybrid_policy_admit_c),
+    .threshold(hybrid_policy_threshold_c),
+    .over_threshold_bitmap(hybrid_over_threshold_c),
+    .under_threshold_bitmap(hybrid_under_threshold_c),
+    .swapout_hint_valid(hybrid_swapout_hint_valid_c),
+    .swapout_hint_port(hybrid_swapout_hint_port_c),
+    .swapin_hint_valid(hybrid_swapin_hint_valid_c),
+    .swapin_hint_port(hybrid_swapin_hint_port_c),
+    .digest(hybrid_policy_digest_c)
+  );
+
+  assign selected_policy_digest_c =
+      (POLICY_MODE == POLICY_HYBRID_THEMIS) ? hybrid_policy_digest_c : 64'd0;
+
   (* dont_touch = "true" *) hestia_extmeta_tables #(
     .PORT_W(PORT_W),
     .RANK_WIDTH(RANK_WIDTH),
@@ -1091,6 +1143,9 @@ module hestia_core_ddr_bbq_extmeta #(
       POLICY_OBM: begin
         ingress_to_sram_c = sram_can_fit_c && (!obm_pkt_targets_longest_c || !ddr_can_fit_c);
       end
+      POLICY_HYBRID_THEMIS: begin
+        ingress_to_sram_c = sram_can_fit_c && hybrid_policy_admit_c;
+      end
       default: begin
         ingress_to_sram_c = sram_can_fit_c;
       end
@@ -1137,6 +1192,7 @@ module hestia_core_ddr_bbq_extmeta #(
     swapout_cells_raw_c = '0;
     for (int pi = 0; pi < PORTS; pi = pi + 1) begin
       if (sram_max_valid[pi] &&
+          ((POLICY_MODE != POLICY_HYBRID_THEMIS) || hybrid_over_threshold_c[pi]) &&
           (!swapout_valid_c ||
            rank_greater(sram_max_rank[pi*RANK_WIDTH +: RANK_WIDTH],
                         sram_max_seq[pi*SEQ_WIDTH +: SEQ_WIDTH],
@@ -1162,6 +1218,7 @@ module hestia_core_ddr_bbq_extmeta #(
     swapin_batch_off_c = '0;
     for (int pi = 0; pi < PORTS; pi = pi + 1) begin
       if (hbm_min_valid[pi] &&
+          ((POLICY_MODE != POLICY_HYBRID_THEMIS) || hybrid_under_threshold_c[pi]) &&
           (!swapin_valid_c ||
            rank_less(hbm_min_rank[pi*RANK_WIDTH +: RANK_WIDTH],
                      hbm_min_seq[pi*SEQ_WIDTH +: SEQ_WIDTH],
@@ -1217,11 +1274,16 @@ module hestia_core_ddr_bbq_extmeta #(
       port_op_batch_off[s_pkt_port*BATCH_OFF_W +: BATCH_OFF_W] = open_batch_fill_q[BATCH_OFF_W-1:0];
       wr_start_c = ingress_to_hbm_c && (wr_state_q == WR_IDLE);
       wr_start_batch_c = open_batch_valid_q ? open_batch_id_q : batch_alloc_head_q;
-    end else if ((POLICY_MODE == POLICY_THEMIS) &&
-                 swapin_valid_c &&
+    end else if (swapin_valid_c &&
                  (sram_free_count_q >= swapin_cells_c) &&
-                 (global_sram_occ_q < {{(COUNT_W-16){1'b0}}, cfg_swap_in_threshold}) &&
-                 (rd_state_q == RD_IDLE)) begin
+                 (rd_state_q == RD_IDLE) &&
+                 (((POLICY_MODE == POLICY_THEMIS) &&
+                   (global_sram_occ_q < {{(COUNT_W-16){1'b0}}, cfg_swap_in_threshold})) ||
+                  ((POLICY_MODE == POLICY_HYBRID_THEMIS) &&
+                   hybrid_swapin_hint_valid_c &&
+                   (swapin_port_c == hybrid_swapin_hint_port_c) &&
+                   count_after_add_leq(sram_count_q[swapin_port_c], swapin_cells_c,
+                                       hybrid_policy_threshold_c)))) begin
       port_op_valid[swapin_port_c] = 1'b1;
       port_op_type[swapin_port_c*3 +: 3] = 3'd4;
       port_op_tier[swapin_port_c] = 1'b0;
@@ -1237,7 +1299,10 @@ module hestia_core_ddr_bbq_extmeta #(
                   ((POLICY_MODE == POLICY_OCCAMY_HEAD || POLICY_MODE == POLICY_OCCAMY_MAX) &&
                    occamy_reclaim_valid_c) ||
                   ((POLICY_MODE == POLICY_OBM) &&
-                   obm_longest_valid_c && !obm_pkt_targets_longest_c)) &&
+                   obm_longest_valid_c && !obm_pkt_targets_longest_c) ||
+                  ((POLICY_MODE == POLICY_HYBRID_THEMIS) &&
+                   hybrid_swapout_hint_valid_c &&
+                   (swapout_port_c == hybrid_swapout_hint_port_c))) &&
                  swapout_valid_c &&
                  ddr_can_fit_c) begin
       port_op_valid[swapout_port_c] = 1'b1;
@@ -1550,7 +1615,8 @@ module hestia_core_ddr_bbq_extmeta #(
             m_axi_wlast <= (BATCH_SIZE == 1);
             m_axi_wdata <= pack_axi_digest_cell(desc_alloc_head_q, s_pkt_rank, s_pkt_seq,
                                                 s_pkt_cell_count, '0, s_pkt_payload) ^
-                           {{(AXI_DATA_WIDTH-64){1'b0}}, meta_digest};
+                           {{(AXI_DATA_WIDTH-64){1'b0}},
+                            meta_digest ^ selected_policy_digest_c};
             wr_state_q <= WR_DATA;
           end
         end

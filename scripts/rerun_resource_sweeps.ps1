@@ -21,7 +21,8 @@ $portsList = @(1, 2, 4, 8)
 $policies = @(
   @{ Design = "DT-Hybrid";      Key = "dt";     Mode = 0 },
   @{ Design = "Occamy-Hybrid";  Key = "occamy"; Mode = 1 },
-  @{ Design = "OBM-Hybrid";     Key = "obm";    Mode = 3 }
+  @{ Design = "OBM-Hybrid";     Key = "obm";    Mode = 3 },
+  @{ Design = "Hybrid-Themis";  Key = "hybrid_themis"; Mode = 4 }
 )
 
 $managedEnv = @(

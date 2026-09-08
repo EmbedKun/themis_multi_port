@@ -52,6 +52,7 @@ proc hestia_policy_name {policy} {
     1 { return "occamy_head_ddr" }
     2 { return "occamy_max_ddr" }
     3 { return "obm_ddr" }
+    4 { return "hybrid_themis_ddr" }
     default { return "unknown" }
   }
 }
@@ -95,6 +96,7 @@ set rtl_files [list \
   [file join $repo_dir rtl hestia_policy_dt.sv] \
   [file join $repo_dir rtl hestia_policy_occamy.sv] \
   [file join $repo_dir rtl hestia_policy_obm.sv] \
+  [file join $repo_dir rtl hestia_policy_hybrid_themis.sv] \
   [file join $repo_dir rtl hestia_paper_scale_resource_core.sv] \
   [file join $repo_dir rtl hestia_core_ddr_bbq_extmeta.sv] \
   [file join $repo_dir rtl hestia_core_ddr_bbq.sv] \

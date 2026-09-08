@@ -13,6 +13,8 @@ dequeue pressure:
 - BBQ + DT: per-port BBQ plus Dynamic Threshold admission.
 - BBQ + Occamy: per-port BBQ plus DT admission and round-robin preemptive reclaim.
 - BBQ + OBM: per-port BBQ plus LQD-style longest-queue push-out.
+- Hybrid Themis: per-port Themis/BBQ scheduling with a DT-partitioned SRAM tier
+  and shared DDR spillover.
 
 ## Resource Boundaries
 
@@ -69,8 +71,12 @@ SRAM-residency policy:
   reclaim moves an over-threshold SRAM packet to DDR.
 - OBM-DDR: push-out victims move from SRAM to DDR; an incoming packet that OBM
   would drop because it targets the longest queue is appended to DDR.
+- Hybrid-Themis-DDR: each port keeps its own Themis-style rank queue, while SRAM
+  admission is gated by a per-port dynamic threshold. Packets above the local
+  SRAM threshold spill to DDR; over-threshold SRAM packets can be migrated out,
+  and under-threshold ports can swap DDR packets back into SRAM.
 
-In all three cases the BBQ is updated with `ADD_SRAM`, `ADD_HBM`,
+In all DDR-aware baseline cases the BBQ is updated with `ADD_SRAM`, `ADD_HBM`,
 `MOVE_SRAM_TO_HBM`, `REMOVE_SRAM`, or `REMOVE_HBM`, so dequeue can select the
 minimum-rank packet across SRAM and DDR for each port. The current baseline DDR
 mode disables Hestia's watermark-driven swap-in/swap-out policy, leaving direct
@@ -220,8 +226,10 @@ Collect:
    max-rank reclaim modes.
 4. Implement `hestia_policy_obm` with longest-port selection and max-rank victim
    eviction.
-5. Add common testbench and Python/Tcl report parser.
-6. Run simulations first, then OOC synthesis for policy-only and core-subsystem
+5. Implement `hestia_policy_hybrid_themis` with DT-partitioned SRAM and
+   Themis-style per-port queueing.
+6. Add common testbench and Python/Tcl report parser.
+7. Run simulations first, then OOC synthesis for policy-only and core-subsystem
    boundaries.
 
 ## Open Decisions

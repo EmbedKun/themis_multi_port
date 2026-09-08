@@ -62,6 +62,7 @@ Themis terminology was HBM-oriented. In this U200 build those paths map to DDR4.
 | `rtl/hestia_policy_dt.sv` | Dynamic-threshold baseline policy. |
 | `rtl/hestia_policy_occamy.sv` | Occamy-style threshold/reclaim baseline policy. |
 | `rtl/hestia_policy_obm.sv` | OBM/LQD-style longest-queue baseline policy. |
+| `rtl/hestia_policy_hybrid_themis.sv` | Hybrid Themis baseline policy with per-port DT SRAM partitioning and Themis-style DDR spillover. |
 | `rtl/hestia_u200_top.sv` | U200 self-test top with synthetic generator, checker, statistics, and AXI DDR master. |
 | `rtl/hestia_u200_bd_cell.v` | Block-design wrapper cell used by the Vivado U200 build script. |
 | `rtl/hestia_synthetic_packet_gen.sv` | FPGA-side synthetic packet generator with configurable rank and packet-size patterns. |
@@ -120,12 +121,22 @@ vivado -mode batch -source scripts/synth_baseline_ddr_core.tcl
 
 export HESTIA_BASELINE_DDR_POLICY_MODE=3  # OBM
 vivado -mode batch -source scripts/synth_baseline_ddr_core.tcl
+
+export HESTIA_BASELINE_DDR_POLICY_MODE=4  # Hybrid Themis
+vivado -mode batch -source scripts/synth_baseline_ddr_core.tcl
 ```
 
 Run the compact and full-capacity resource sweeps:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\rerun_resource_sweeps.ps1 -Mode both
+```
+
+On Linux hosts:
+
+```bash
+bash scripts/rerun_resource_sweeps.sh both
+HESTIA_SWEEP_DESIGNS=hybrid_themis bash scripts/rerun_resource_sweeps.sh fullscale
 ```
 
 The synthesis script writes `hestia_paper_resource_table.md` and

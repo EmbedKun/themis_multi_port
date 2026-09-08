@@ -143,6 +143,7 @@ module hestia_core_ddr_bbq #(
   localparam int POLICY_OCCAMY_HEAD = 1;
   localparam int POLICY_OCCAMY_MAX = 2;
   localparam int POLICY_OBM = 3;
+  localparam int POLICY_HYBRID_THEMIS = 4;
 
   localparam int SELECT_REFRESH_CYCLES = PORTS + 3;
   localparam int REFRESH_COUNT_W = (SELECT_REFRESH_CYCLES <= 2) ? 1 : $clog2(SELECT_REFRESH_CYCLES);
@@ -204,10 +205,12 @@ module hestia_core_ddr_bbq #(
   logic [15:0] sram_count_q [0:PORTS-1];
   logic [15:0] hbm_count_q [0:PORTS-1];
   logic [PORTS*16-1:0] policy_sram_occ_flat_c;
+  logic [PORTS*16-1:0] policy_hbm_occ_flat_c;
   logic [POLICY_ALPHA_SHIFT_WIDTH-1:0] policy_alpha_shift_c;
   logic policy_admit_c;
   logic [15:0] policy_threshold_c;
   logic [PORTS-1:0] policy_over_threshold_c;
+  logic [PORTS-1:0] policy_under_threshold_c;
   logic policy_reclaim_valid_c;
   logic [PORT_W-1:0] policy_reclaim_port_c;
   logic policy_reclaim_fire_q;
@@ -215,6 +218,11 @@ module hestia_core_ddr_bbq #(
   logic [PORT_W-1:0] obm_longest_port_c;
   logic [15:0] obm_longest_occupancy_c;
   logic obm_pkt_targets_longest_c;
+  logic policy_swapout_hint_valid_c;
+  logic [PORT_W-1:0] policy_swapout_hint_port_c;
+  logic policy_swapin_hint_valid_c;
+  logic [PORT_W-1:0] policy_swapin_hint_port_c;
+  logic [63:0] policy_hybrid_digest_c;
 
   wr_state_t wr_state_q;
   logic [BATCH_ID_W-1:0] wr_batch_q;
@@ -387,6 +395,7 @@ module hestia_core_ddr_bbq #(
       assign dbg_sram_count_flat[gp*16 +: 16] = sram_count_q[gp];
       assign dbg_hbm_count_flat[gp*16 +: 16] = hbm_count_q[gp];
       assign policy_sram_occ_flat_c[gp*16 +: 16] = sram_count_q[gp];
+      assign policy_hbm_occ_flat_c[gp*16 +: 16] = hbm_count_q[gp];
 
       hestia_port_bbq #(
         .RANK_WIDTH(RANK_WIDTH),
@@ -451,12 +460,18 @@ module hestia_core_ddr_bbq #(
         .threshold(policy_threshold_c)
       );
       assign policy_over_threshold_c = '0;
+      assign policy_under_threshold_c = '0;
       assign policy_reclaim_valid_c = 1'b0;
       assign policy_reclaim_port_c = '0;
       assign obm_longest_valid_c = 1'b0;
       assign obm_longest_port_c = '0;
       assign obm_longest_occupancy_c = '0;
       assign obm_pkt_targets_longest_c = 1'b0;
+      assign policy_swapout_hint_valid_c = 1'b0;
+      assign policy_swapout_hint_port_c = '0;
+      assign policy_swapin_hint_valid_c = 1'b0;
+      assign policy_swapin_hint_port_c = '0;
+      assign policy_hybrid_digest_c = '0;
     end else if ((POLICY_MODE == POLICY_OCCAMY_HEAD) ||
                  (POLICY_MODE == POLICY_OCCAMY_MAX)) begin : g_occamy_policy
       hestia_policy_occamy #(
@@ -485,6 +500,12 @@ module hestia_core_ddr_bbq #(
       assign obm_longest_port_c = '0;
       assign obm_longest_occupancy_c = '0;
       assign obm_pkt_targets_longest_c = 1'b0;
+      assign policy_under_threshold_c = '0;
+      assign policy_swapout_hint_valid_c = 1'b0;
+      assign policy_swapout_hint_port_c = '0;
+      assign policy_swapin_hint_valid_c = 1'b0;
+      assign policy_swapin_hint_port_c = '0;
+      assign policy_hybrid_digest_c = '0;
     end else if (POLICY_MODE == POLICY_OBM) begin : g_obm_policy
       hestia_policy_obm #(
         .PORTS(PORTS),
@@ -501,18 +522,62 @@ module hestia_core_ddr_bbq #(
       assign policy_admit_c = 1'b1;
       assign policy_threshold_c = '0;
       assign policy_over_threshold_c = '0;
+      assign policy_under_threshold_c = '0;
       assign policy_reclaim_valid_c = 1'b0;
       assign policy_reclaim_port_c = '0;
-    end else begin : g_themis_policy
-      assign policy_admit_c = 1'b1;
-      assign policy_threshold_c = '0;
-      assign policy_over_threshold_c = '0;
+      assign policy_swapout_hint_valid_c = 1'b0;
+      assign policy_swapout_hint_port_c = '0;
+      assign policy_swapin_hint_valid_c = 1'b0;
+      assign policy_swapin_hint_port_c = '0;
+      assign policy_hybrid_digest_c = '0;
+    end else if (POLICY_MODE == POLICY_HYBRID_THEMIS) begin : g_hybrid_themis_policy
+      hestia_policy_hybrid_themis #(
+        .PORTS(PORTS),
+        .CELL_COUNT_WIDTH(CELL_COUNT_WIDTH),
+        .OCC_WIDTH(16),
+        .ALPHA_SHIFT_WIDTH(POLICY_ALPHA_SHIFT_WIDTH)
+      ) policy_hybrid_themis (
+        .clk(clk),
+        .resetn(resetn),
+        .cfg_alpha_shift(policy_alpha_shift_c),
+        .pkt_valid(1'b1),
+        .pkt_port(action_port_q),
+        .pkt_cell_count(action_cell_count_q),
+        .free_cells(sram_free_count_q),
+        .sram_occ_flat(policy_sram_occ_flat_c),
+        .ddr_occ_flat(policy_hbm_occ_flat_c),
+        .pkt_admit(policy_admit_c),
+        .threshold(policy_threshold_c),
+        .over_threshold_bitmap(policy_over_threshold_c),
+        .under_threshold_bitmap(policy_under_threshold_c),
+        .swapout_hint_valid(policy_swapout_hint_valid_c),
+        .swapout_hint_port(policy_swapout_hint_port_c),
+        .swapin_hint_valid(policy_swapin_hint_valid_c),
+        .swapin_hint_port(policy_swapin_hint_port_c),
+        .digest(policy_hybrid_digest_c)
+      );
       assign policy_reclaim_valid_c = 1'b0;
       assign policy_reclaim_port_c = '0;
       assign obm_longest_valid_c = 1'b0;
       assign obm_longest_port_c = '0;
       assign obm_longest_occupancy_c = '0;
       assign obm_pkt_targets_longest_c = 1'b0;
+    end else begin : g_themis_policy
+      assign policy_admit_c = 1'b1;
+      assign policy_threshold_c = '0;
+      assign policy_over_threshold_c = '0;
+      assign policy_under_threshold_c = '0;
+      assign policy_reclaim_valid_c = 1'b0;
+      assign policy_reclaim_port_c = '0;
+      assign obm_longest_valid_c = 1'b0;
+      assign obm_longest_port_c = '0;
+      assign obm_longest_occupancy_c = '0;
+      assign obm_pkt_targets_longest_c = 1'b0;
+      assign policy_swapout_hint_valid_c = 1'b0;
+      assign policy_swapout_hint_port_c = '0;
+      assign policy_swapin_hint_valid_c = 1'b0;
+      assign policy_swapin_hint_port_c = '0;
+      assign policy_hybrid_digest_c = '0;
     end
   endgenerate
 
@@ -1739,7 +1804,8 @@ module hestia_core_ddr_bbq #(
             state_q <= ST_IDLE;
           end else if (POLICY_MODE == POLICY_DT ||
                        POLICY_MODE == POLICY_OCCAMY_HEAD ||
-                       POLICY_MODE == POLICY_OCCAMY_MAX) begin
+                       POLICY_MODE == POLICY_OCCAMY_MAX ||
+                       POLICY_MODE == POLICY_HYBRID_THEMIS) begin
             if (policy_admit_c && (sram_free_count_q >= action_cells_v)) begin
               create_sram_packet(action_port_q, action_rank_q, action_seq_q,
                                  action_cell_count_q, action_payload_q);

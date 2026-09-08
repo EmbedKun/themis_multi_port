@@ -181,6 +181,7 @@ set rtl_files [list \
   [file join $repo_dir rtl hestia_policy_dt.sv] \
   [file join $repo_dir rtl hestia_policy_occamy.sv] \
   [file join $repo_dir rtl hestia_policy_obm.sv] \
+  [file join $repo_dir rtl hestia_policy_hybrid_themis.sv] \
   [file join $repo_dir rtl hestia_paper_scale_resource_core.sv] \
   [file join $repo_dir rtl hestia_core_ddr_bbq_extmeta.sv] \
   [file join $repo_dir rtl hestia_core_ddr_bbq.sv] \
