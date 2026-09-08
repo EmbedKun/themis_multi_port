@@ -44,6 +44,9 @@ set rtl_files [list \
   [file join $repo_dir rtl hestia_pkg.sv] \
   [file join $repo_dir rtl hestia_port_rank_queue.sv] \
   [file join $repo_dir rtl hestia_port_bbq.sv] \
+  [file join $repo_dir rtl hestia_policy_dt.sv] \
+  [file join $repo_dir rtl hestia_policy_occamy.sv] \
+  [file join $repo_dir rtl hestia_policy_obm.sv] \
   [file join $repo_dir rtl hestia_core_ddr.sv] \
   [file join $repo_dir rtl hestia_core_ddr_bbq.sv] \
   [file join $repo_dir rtl hestia_synthetic_packet_gen.sv] \

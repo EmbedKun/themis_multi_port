@@ -274,7 +274,7 @@ module hestia_port_bbq #(
       refresh_hbm_min_desc_q <= '0;
       clear_candidate_outputs();
     end else begin
-      unique case (state_q)
+      case (state_q)
         S_INIT: begin
           if (init_idx_q < BBQ_BITMAP_WIDTH_INIT) begin
             sram_l2_bitmap_q[init_idx_q] <= '0;
@@ -303,7 +303,7 @@ module hestia_port_bbq #(
             add_tier_q <= TIER_SRAM;
             remove_tier_q <= TIER_SRAM;
 
-            unique case (cmd_op)
+            case (cmd_op)
               MP_BBQ_CMD_ADD_SRAM: begin
                 add_tier_q <= TIER_SRAM;
                 state_q <= S_ADD_READ;

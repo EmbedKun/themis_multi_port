@@ -14,6 +14,9 @@ set_property simulator_language Mixed [current_project]
 set sv_files [list \
   [file join $repo_dir rtl hestia_pkg.sv] \
   [file join $repo_dir rtl hestia_port_bbq.sv] \
+  [file join $repo_dir rtl hestia_policy_dt.sv] \
+  [file join $repo_dir rtl hestia_policy_occamy.sv] \
+  [file join $repo_dir rtl hestia_policy_obm.sv] \
   [file join $repo_dir rtl hestia_core_ddr_bbq.sv] \
   [file join $repo_dir rtl hestia_synthetic_packet_gen.sv] \
   [file join $repo_dir rtl hestia_u200_top.sv] \
@@ -52,10 +55,10 @@ set u200_max_cell_count [themis_env_or HESTIA_U200_MAX_CELL_COUNT 4]
 set u200_cell_count_mode [themis_env_or HESTIA_U200_CELL_COUNT_MODE 1]
 set u200_max_packets [themis_env_or HESTIA_U200_MAX_PACKETS 128]
 set u200_gen_period [themis_env_or HESTIA_U200_GEN_PERIOD_CYCLES 1]
-set u200_drain_after_gen [themis_env_or HESTIA_U200_DRAIN_AFTER_GENERATION_ONLY 1]
+set u200_drain_after_gen [themis_env_or HESTIA_U200_DRAIN_AFTER_GENERATION_ONLY 0]
 set u200_drain_start_packets [themis_env_or HESTIA_U200_DRAIN_START_PACKETS 0]
 set u200_drain_period [themis_env_or HESTIA_U200_DRAIN_PERIOD_CYCLES 1]
-set u200_rank_dist [themis_env_or HESTIA_U200_RANK_DIST 0]
+set u200_rank_dist [themis_env_or HESTIA_U200_RANK_DIST 3]
 set u200_high_priority [themis_env_or HESTIA_U200_HIGH_PRIORITY_PER1024 256]
 set u200_swap_in_threshold [themis_env_or HESTIA_U200_SWAP_IN_THRESHOLD 16]
 set u200_swap_out_threshold [themis_env_or HESTIA_U200_SWAP_OUT_THRESHOLD 48]

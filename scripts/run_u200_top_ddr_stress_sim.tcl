@@ -29,7 +29,7 @@ set stress_cell_count_width [themis_env_or HESTIA_STRESS_CELL_COUNT_WIDTH 4]
 set stress_max_cell_count [themis_env_or HESTIA_STRESS_MAX_CELL_COUNT 4]
 set stress_cell_count_mode [themis_env_or HESTIA_STRESS_CELL_COUNT_MODE 1]
 set stress_gen_period_cycles [themis_env_or HESTIA_STRESS_GEN_PERIOD_CYCLES 1]
-set stress_drain_start_packets [themis_env_or HESTIA_STRESS_DRAIN_START_PACKETS 512]
+set stress_drain_start_packets [themis_env_or HESTIA_STRESS_DRAIN_START_PACKETS 256]
 set stress_drain_period_cycles [themis_env_or HESTIA_STRESS_DRAIN_PERIOD_CYCLES 3]
 set stress_rank_dist [themis_env_or HESTIA_STRESS_RANK_DIST 3]
 set stress_swap_in_threshold [themis_env_or HESTIA_STRESS_SWAP_IN_THRESHOLD 16]
@@ -44,6 +44,9 @@ set rtl_files [list \
   [file join $repo_dir rtl hestia_pkg.sv] \
   [file join $repo_dir rtl hestia_port_rank_queue.sv] \
   [file join $repo_dir rtl hestia_port_bbq.sv] \
+  [file join $repo_dir rtl hestia_policy_dt.sv] \
+  [file join $repo_dir rtl hestia_policy_occamy.sv] \
+  [file join $repo_dir rtl hestia_policy_obm.sv] \
   [file join $repo_dir rtl hestia_core_ddr.sv] \
   [file join $repo_dir rtl hestia_core_ddr_bbq.sv] \
   [file join $repo_dir rtl hestia_synthetic_packet_gen.sv] \

@@ -30,8 +30,11 @@ if {[string first "synth_design Complete" $synth_status] < 0} {
   exit 1
 }
 
-launch_runs impl_1 -to_step write_bitstream -jobs $jobs
-wait_on_run impl_1
+set impl_status [get_property STATUS [get_runs impl_1]]
+if {[string first "write_bitstream Complete" $impl_status] < 0} {
+  launch_runs impl_1 -to_step write_bitstream -jobs $jobs
+  wait_on_run impl_1
+}
 set impl_status [get_property STATUS [get_runs impl_1]]
 puts "Hestia U200 implementation status: $impl_status"
 if {[string first "write_bitstream Complete" $impl_status] < 0} {
