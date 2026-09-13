@@ -68,15 +68,29 @@ export HESTIA_ASIC_REPORT_DIR="build/dc_hestia_4p_1ghz"
 dc_shell -f asic_handoff/scripts/run_dc_logic_only.tcl | tee build/dc_hestia_4p_1ghz.log
 ```
 
+Default timing mode enables the scheduler candidate pipeline and disables
+observability logic:
+
+```bash
+export HESTIA_ASIC_PIPELINE_SCHEDULER_CANDIDATES=1
+export HESTIA_ASIC_PIPELINE_PORT_QUEUE_INPUTS=0
+export HESTIA_ASIC_ENABLE_OBSERVABILITY=0
+```
+
 Outputs:
 
 ```text
 build/dc_hestia_4p_1ghz/check_design.rpt
 build/dc_hestia_4p_1ghz/area_hier.rpt
+build/dc_hestia_4p_1ghz/reference_hier.rpt
+build/dc_hestia_4p_1ghz/qor.rpt
 build/dc_hestia_4p_1ghz/timing.rpt
 build/dc_hestia_4p_1ghz/power.rpt
 build/dc_hestia_4p_1ghz/hestia_asic_core_mapped.v
 ```
+
+Sanity check: `reference_hier.rpt` should still list the SRAM wrapper as a
+black-box/macro reference; SRAM bit-cell area is not part of this task.
 
 ## Run All Schemes
 
@@ -108,8 +122,9 @@ Sweep outputs are placed under:
 build/dc_logic_only_<clock>_<timestamp>/<scheme>_<ports>p/
 ```
 
-Each run directory contains `check_design.rpt`, `area_hier.rpt`, `timing.rpt`,
-`power.rpt`, and `hestia_asic_core_mapped.v`.
+Each run directory contains `check_design.rpt`, `area_hier.rpt`,
+`reference_hier.rpt`, `qor.rpt`, `timing.rpt`, `power.rpt`, and
+`hestia_asic_core_mapped.v`.
 
 ## Vivado Smoke Check
 

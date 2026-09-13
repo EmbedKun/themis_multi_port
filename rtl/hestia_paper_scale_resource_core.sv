@@ -9,6 +9,8 @@ module hestia_paper_scale_port_queue #(
   parameter int BATCH_OFF_W = 3,
   parameter int BBQ_BITMAP_WIDTH = 32,
   parameter int OCC_WIDTH = 27,
+  parameter bit INPUT_PIPELINE = 1'b0,
+  parameter bit ENABLE_DIGEST = 1'b1,
   localparam int LEVEL_W = $clog2(BBQ_BITMAP_WIDTH),
   localparam int PIPE_W = RANK_WIDTH + SEQ_WIDTH + CELL_COUNT_WIDTH +
                           DESC_W + BATCH_ID_W + BATCH_OFF_W + 8
@@ -176,6 +178,54 @@ module hestia_paper_scale_port_queue #(
   assign sram_occupancy = sram_occ_q;
   assign ddr_occupancy = ddr_occ_q;
 
+  logic                         op_valid_eff;
+  logic [2:0]                   op_type_eff;
+  logic                         op_tier_eff;
+  logic [RANK_WIDTH-1:0]        op_rank_eff;
+  logic [SEQ_WIDTH-1:0]         op_seq_eff;
+  logic [CELL_COUNT_WIDTH-1:0]  op_cell_count_eff;
+  logic [DESC_W-1:0]            op_desc_eff;
+  logic [BATCH_ID_W-1:0]        op_batch_id_eff;
+  logic [BATCH_OFF_W-1:0]       op_batch_off_eff;
+
+  generate
+    if (INPUT_PIPELINE) begin : gen_op_input_pipeline
+      always_ff @(posedge clk) begin
+        if (!resetn) begin
+          op_valid_eff <= 1'b0;
+          op_type_eff <= '0;
+          op_tier_eff <= 1'b0;
+          op_rank_eff <= '0;
+          op_seq_eff <= '0;
+          op_cell_count_eff <= '0;
+          op_desc_eff <= '0;
+          op_batch_id_eff <= '0;
+          op_batch_off_eff <= '0;
+        end else begin
+          op_valid_eff <= op_valid;
+          op_type_eff <= op_type;
+          op_tier_eff <= op_tier;
+          op_rank_eff <= op_rank;
+          op_seq_eff <= op_seq;
+          op_cell_count_eff <= op_cell_count;
+          op_desc_eff <= op_desc;
+          op_batch_id_eff <= op_batch_id;
+          op_batch_off_eff <= op_batch_off;
+        end
+      end
+    end else begin : gen_op_input_passthrough
+      assign op_valid_eff = op_valid;
+      assign op_type_eff = op_type;
+      assign op_tier_eff = op_tier;
+      assign op_rank_eff = op_rank;
+      assign op_seq_eff = op_seq;
+      assign op_cell_count_eff = op_cell_count;
+      assign op_desc_eff = op_desc;
+      assign op_batch_id_eff = op_batch_id;
+      assign op_batch_off_eff = op_batch_off;
+    end
+  endgenerate
+
   always_ff @(posedge clk) begin
     logic [PIPE_W-1:0] in_word;
     logic [LEVEL_W-1:0] l1_idx;
@@ -183,11 +233,12 @@ module hestia_paper_scale_port_queue #(
     logic [OCC_WIDTH-1:0] cells_ext;
     int stage;
 
-    in_word = pack_op(op_type, op_tier, op_rank, op_seq, op_cell_count,
-                      op_desc, op_batch_id, op_batch_off);
-    l1_idx = op_rank[RANK_WIDTH-1 -: LEVEL_W];
-    l2_idx = op_rank[LEVEL_W-1:0];
-    cells_ext = {{(OCC_WIDTH-CELL_COUNT_WIDTH){1'b0}}, op_cell_count};
+    in_word = pack_op(op_type_eff, op_tier_eff, op_rank_eff, op_seq_eff,
+                      op_cell_count_eff, op_desc_eff, op_batch_id_eff,
+                      op_batch_off_eff);
+    l1_idx = op_rank_eff[RANK_WIDTH-1 -: LEVEL_W];
+    l2_idx = op_rank_eff[LEVEL_W-1:0];
+    cells_ext = {{(OCC_WIDTH-CELL_COUNT_WIDTH){1'b0}}, op_cell_count_eff};
 
     if (!resetn) begin
       sram_l1_q <= '0;
@@ -227,10 +278,15 @@ module hestia_paper_scale_port_queue #(
         pipe_q[stage] <= '0;
       end
     end else begin
-      valid_pipe_q <= {valid_pipe_q[9:0], op_valid};
-      pipe_q[0] <= in_word;
-      for (stage = 1; stage < 11; stage = stage + 1) begin
-        pipe_q[stage] <= pipe_q[stage-1] ^ fold_digest_to_pipe(digest);
+      if (ENABLE_DIGEST) begin
+        valid_pipe_q <= {valid_pipe_q[9:0], op_valid_eff};
+        pipe_q[0] <= in_word;
+        for (stage = 1; stage < 11; stage = stage + 1) begin
+          pipe_q[stage] <= pipe_q[stage-1] ^ fold_digest_to_pipe(digest);
+        end
+      end else begin
+        valid_pipe_q <= '0;
+        digest <= '0;
       end
 
       sram_l1_min_idx_q <= find_first(sram_l1_q);
@@ -242,39 +298,39 @@ module hestia_paper_scale_port_queue #(
       ddr_l2_min_idx_q <= find_first(ddr_l2_shadow_q);
       ddr_l2_max_idx_q <= find_last(ddr_l2_shadow_q);
 
-      if (op_valid) begin
-        unique case (op_type)
+      if (op_valid_eff) begin
+        unique case (op_type_eff)
           3'd1: begin
-            if (!op_tier) begin
+            if (!op_tier_eff) begin
               sram_l1_q[l1_idx] <= 1'b1;
               sram_l2_shadow_q[l2_idx] <= 1'b1;
               sram_occ_q <= sram_occ_q + cells_ext;
-              if (!sram_min_valid || rank_less(op_rank, op_seq, sram_min_rank, sram_min_seq)) begin
+              if (!sram_min_valid || rank_less(op_rank_eff, op_seq_eff, sram_min_rank, sram_min_seq)) begin
                 sram_min_valid <= 1'b1;
-                sram_min_rank <= op_rank;
-                sram_min_seq <= op_seq;
-                sram_min_desc <= op_desc;
-                sram_min_cell_count <= op_cell_count;
+                sram_min_rank <= op_rank_eff;
+                sram_min_seq <= op_seq_eff;
+                sram_min_desc <= op_desc_eff;
+                sram_min_cell_count <= op_cell_count_eff;
               end
-              if (!sram_max_valid || rank_greater(op_rank, op_seq, sram_max_rank, sram_max_seq)) begin
+              if (!sram_max_valid || rank_greater(op_rank_eff, op_seq_eff, sram_max_rank, sram_max_seq)) begin
                 sram_max_valid <= 1'b1;
-                sram_max_rank <= op_rank;
-                sram_max_seq <= op_seq;
-                sram_max_desc <= op_desc;
-                sram_max_cell_count <= op_cell_count;
+                sram_max_rank <= op_rank_eff;
+                sram_max_seq <= op_seq_eff;
+                sram_max_desc <= op_desc_eff;
+                sram_max_cell_count <= op_cell_count_eff;
               end
             end else begin
               ddr_l1_q[l1_idx] <= 1'b1;
               ddr_l2_shadow_q[l2_idx] <= 1'b1;
               ddr_occ_q <= ddr_occ_q + cells_ext;
-              if (!ddr_min_valid || rank_less(op_rank, op_seq, ddr_min_rank, ddr_min_seq)) begin
+              if (!ddr_min_valid || rank_less(op_rank_eff, op_seq_eff, ddr_min_rank, ddr_min_seq)) begin
                 ddr_min_valid <= 1'b1;
-                ddr_min_rank <= op_rank;
-                ddr_min_seq <= op_seq;
-                ddr_min_desc <= op_desc;
-                ddr_min_cell_count <= op_cell_count;
-                ddr_min_batch_id <= op_batch_id;
-                ddr_min_batch_off <= op_batch_off;
+                ddr_min_rank <= op_rank_eff;
+                ddr_min_seq <= op_seq_eff;
+                ddr_min_desc <= op_desc_eff;
+                ddr_min_cell_count <= op_cell_count_eff;
+                ddr_min_batch_id <= op_batch_id_eff;
+                ddr_min_batch_off <= op_batch_off_eff;
               end
             end
           end
@@ -287,7 +343,7 @@ module hestia_paper_scale_port_queue #(
             sram_min_valid <= |sram_l1_q;
             sram_min_rank <= {sram_l1_min_idx_q, sram_l2_min_idx_q};
             sram_min_seq <= sram_min_seq + 1'b1;
-            sram_min_cell_count <= op_cell_count;
+            sram_min_cell_count <= op_cell_count_eff;
           end
           3'd3: begin
             if (sram_occ_q > cells_ext) begin
@@ -298,7 +354,7 @@ module hestia_paper_scale_port_queue #(
             sram_max_valid <= |sram_l1_q;
             sram_max_rank <= {sram_l1_max_idx_q, sram_l2_max_idx_q};
             sram_max_seq <= sram_max_seq - 1'b1;
-            sram_max_cell_count <= op_cell_count;
+            sram_max_cell_count <= op_cell_count_eff;
           end
           3'd4: begin
             if (ddr_occ_q > cells_ext) begin
@@ -312,7 +368,7 @@ module hestia_paper_scale_port_queue #(
             sram_l1_q[l1_idx] <= 1'b1;
             sram_l2_shadow_q[l2_idx] <= 1'b1;
             ddr_min_valid <= |ddr_l1_q;
-            sram_min_cell_count <= op_cell_count;
+            sram_min_cell_count <= op_cell_count_eff;
           end
           3'd5: begin
             if (sram_occ_q > cells_ext) begin
@@ -324,24 +380,30 @@ module hestia_paper_scale_port_queue #(
             ddr_l1_q[l1_idx] <= 1'b1;
             ddr_l2_shadow_q[l2_idx] <= 1'b1;
             ddr_min_valid <= 1'b1;
-            ddr_min_rank <= op_rank;
-            ddr_min_seq <= op_seq;
-            ddr_min_desc <= op_desc;
-            ddr_min_cell_count <= op_cell_count;
-            ddr_min_batch_id <= op_batch_id;
-            ddr_min_batch_off <= op_batch_off;
+            ddr_min_rank <= op_rank_eff;
+            ddr_min_seq <= op_seq_eff;
+            ddr_min_desc <= op_desc_eff;
+            ddr_min_cell_count <= op_cell_count_eff;
+            ddr_min_batch_id <= op_batch_id_eff;
+            ddr_min_batch_off <= op_batch_off_eff;
           end
           default: begin
-            digest <= digest ^ fold_pipe_to_digest(pipe_q[10]) ^
-                      {58'd0, sram_l1_min_idx_q, ddr_l1_min_idx_q};
+            if (ENABLE_DIGEST) begin
+              digest <= digest ^ fold_pipe_to_digest(pipe_q[10]) ^
+                        {58'd0, sram_l1_min_idx_q, ddr_l1_min_idx_q};
+            end
           end
         endcase
       end
 
-      digest <= digest ^ fold_pipe_to_digest(pipe_q[10]) ^
-                {{(64-RANK_WIDTH){1'b0}}, sram_min_rank} ^
-                {{(64-RANK_WIDTH){1'b0}}, ddr_min_rank} ^
-                {{(64-OCC_WIDTH){1'b0}}, sram_occ_q};
+      if (ENABLE_DIGEST) begin
+        digest <= digest ^ fold_pipe_to_digest(pipe_q[10]) ^
+                  {{(64-RANK_WIDTH){1'b0}}, sram_min_rank} ^
+                  {{(64-RANK_WIDTH){1'b0}}, ddr_min_rank} ^
+                  {{(64-OCC_WIDTH){1'b0}}, sram_occ_q};
+      end else begin
+        digest <= '0;
+      end
     end
   end
 
