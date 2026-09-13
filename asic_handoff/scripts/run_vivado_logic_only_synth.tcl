@@ -104,9 +104,6 @@ set batch_slots [env_or HESTIA_ASIC_BATCH_SLOTS 8388608]
 set packet_slots [env_or HESTIA_ASIC_PACKET_SLOTS 81920]
 set bbq_bitmap_width [env_or HESTIA_ASIC_BBQ_BITMAP_WIDTH 32]
 set policy_alpha_shift [env_or HESTIA_ASIC_POLICY_ALPHA_SHIFT 0]
-set enable_observability [env_or HESTIA_ASIC_ENABLE_OBSERVABILITY 0]
-set pipeline_scheduler_candidates [env_or HESTIA_ASIC_PIPELINE_SCHEDULER_CANDIDATES 1]
-set pipeline_port_queue_inputs [env_or HESTIA_ASIC_PIPELINE_PORT_QUEUE_INPUTS 0]
 
 puts "Hestia ASIC logic-only synthesis:"
 puts "  design=${design_name} policy=${policy_mode} ports=${ports}"
@@ -132,10 +129,7 @@ synth_design -top hestia_asic_core -part $part_name -mode out_of_context \
   -generic PACKET_SLOTS=$packet_slots \
   -generic BBQ_BITMAP_WIDTH=$bbq_bitmap_width \
   -generic POLICY_MODE=$policy_mode \
-  -generic POLICY_ALPHA_SHIFT=$policy_alpha_shift \
-  -generic ENABLE_OBSERVABILITY=$enable_observability \
-  -generic PIPELINE_SCHEDULER_CANDIDATES=$pipeline_scheduler_candidates \
-  -generic PIPELINE_PORT_QUEUE_INPUTS=$pipeline_port_queue_inputs
+  -generic POLICY_ALPHA_SHIFT=$policy_alpha_shift
 
 create_clock -period $clk_period_ns -name clk [get_ports clk]
 

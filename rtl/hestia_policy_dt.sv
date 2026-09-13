@@ -5,6 +5,8 @@ module hestia_policy_dt #(
   parameter int CELL_COUNT_WIDTH = 4,
   parameter int OCC_WIDTH = 16,
   parameter int ALPHA_SHIFT_WIDTH = 4,
+  parameter int STATIC_ALPHA_SHIFT = -1,
+  parameter bit FAST_SMALL_CELL_COMPARE = 1'b0,
   localparam int PORT_W = (PORTS <= 2) ? 1 : $clog2(PORTS)
 ) (
   input  logic [ALPHA_SHIFT_WIDTH-1:0] cfg_alpha_shift,
@@ -36,19 +38,58 @@ module hestia_policy_dt #(
   logic [OCC_WIDTH-1:0] port_occ;
   logic [OCC_WIDTH-1:0] cells;
 
-  always_comb begin
-    threshold_wide = {{(THRESH_W-OCC_WIDTH){1'b0}}, free_cells} << cfg_alpha_shift;
-    if (|threshold_wide[THRESH_W-1:OCC_WIDTH]) begin
-      threshold = '1;
-    end else begin
-      threshold = threshold_wide[OCC_WIDTH-1:0];
+  function automatic logic admit_under_threshold(
+    input logic [OCC_WIDTH-1:0] occ_i,
+    input logic [OCC_WIDTH-1:0] cells_i,
+    input logic [OCC_WIDTH-1:0] threshold_i
+  );
+    logic [4:0] low_sum_v;
+    begin
+      if ((STATIC_ALPHA_SHIFT == 0) && FAST_SMALL_CELL_COMPARE && (OCC_WIDTH > 4)) begin
+        low_sum_v = {1'b0, occ_i[3:0]} + {1'b0, cells_i[3:0]};
+        admit_under_threshold =
+          (occ_i[OCC_WIDTH-1:4] < threshold_i[OCC_WIDTH-1:4]) ||
+          ((occ_i[OCC_WIDTH-1:4] == threshold_i[OCC_WIDTH-1:4]) &&
+           !low_sum_v[4] && (low_sum_v[3:0] <= threshold_i[3:0]));
+      end else begin
+        admit_under_threshold = ((occ_i + cells_i) <= threshold_i);
+      end
     end
+  endfunction
 
-    port_occ = get_occ(pkt_port);
-    cells = cell_count_occ(pkt_cell_count);
-    pkt_admit = pkt_valid &&
-                (pkt_cell_count != '0) &&
-                (free_cells >= cells) &&
-                ((port_occ + cells) <= threshold);
-  end
+  generate
+    if (STATIC_ALPHA_SHIFT >= 0) begin : gen_static_alpha_shift
+      always_comb begin
+        threshold_wide = {{(THRESH_W-OCC_WIDTH){1'b0}}, free_cells} << STATIC_ALPHA_SHIFT;
+        if (|threshold_wide[THRESH_W-1:OCC_WIDTH]) begin
+          threshold = '1;
+        end else begin
+          threshold = threshold_wide[OCC_WIDTH-1:0];
+        end
+
+        port_occ = get_occ(pkt_port);
+        cells = cell_count_occ(pkt_cell_count);
+        pkt_admit = pkt_valid &&
+                    (pkt_cell_count != '0) &&
+                    (free_cells >= cells) &&
+                    admit_under_threshold(port_occ, cells, threshold);
+      end
+    end else begin : gen_dynamic_alpha_shift
+      always_comb begin
+        threshold_wide = {{(THRESH_W-OCC_WIDTH){1'b0}}, free_cells} << cfg_alpha_shift;
+        if (|threshold_wide[THRESH_W-1:OCC_WIDTH]) begin
+          threshold = '1;
+        end else begin
+          threshold = threshold_wide[OCC_WIDTH-1:0];
+        end
+
+        port_occ = get_occ(pkt_port);
+        cells = cell_count_occ(pkt_cell_count);
+        pkt_admit = pkt_valid &&
+                    (pkt_cell_count != '0) &&
+                    (free_cells >= cells) &&
+                    admit_under_threshold(port_occ, cells, threshold);
+      end
+    end
+  endgenerate
 endmodule

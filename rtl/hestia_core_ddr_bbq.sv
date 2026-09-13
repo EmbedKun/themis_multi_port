@@ -448,7 +448,9 @@ module hestia_core_ddr_bbq #(
         .PORTS(PORTS),
         .CELL_COUNT_WIDTH(CELL_COUNT_WIDTH),
         .OCC_WIDTH(16),
-        .ALPHA_SHIFT_WIDTH(POLICY_ALPHA_SHIFT_WIDTH)
+        .ALPHA_SHIFT_WIDTH(POLICY_ALPHA_SHIFT_WIDTH),
+        .STATIC_ALPHA_SHIFT(POLICY_ALPHA_SHIFT),
+        .FAST_SMALL_CELL_COMPARE(1'b1)
       ) policy_dt (
         .cfg_alpha_shift(policy_alpha_shift_c),
         .pkt_valid(1'b1),
@@ -478,7 +480,8 @@ module hestia_core_ddr_bbq #(
         .PORTS(PORTS),
         .CELL_COUNT_WIDTH(CELL_COUNT_WIDTH),
         .OCC_WIDTH(16),
-        .ALPHA_SHIFT_WIDTH(POLICY_ALPHA_SHIFT_WIDTH)
+        .ALPHA_SHIFT_WIDTH(POLICY_ALPHA_SHIFT_WIDTH),
+        .STATIC_ALPHA_SHIFT(POLICY_ALPHA_SHIFT)
       ) policy_occamy (
         .clk(clk),
         .resetn(resetn),
@@ -535,7 +538,8 @@ module hestia_core_ddr_bbq #(
         .PORTS(PORTS),
         .CELL_COUNT_WIDTH(CELL_COUNT_WIDTH),
         .OCC_WIDTH(16),
-        .ALPHA_SHIFT_WIDTH(POLICY_ALPHA_SHIFT_WIDTH)
+        .ALPHA_SHIFT_WIDTH(POLICY_ALPHA_SHIFT_WIDTH),
+        .STATIC_ALPHA_SHIFT(POLICY_ALPHA_SHIFT)
       ) policy_hybrid_themis (
         .clk(clk),
         .resetn(resetn),

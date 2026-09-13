@@ -249,6 +249,7 @@ module hestia_extmeta_tables #(
   parameter int ACTIVE_BATCH_SLOTS = 4096,
   parameter int PAYLOAD_CELL_WIDTH = 512,
   parameter bit USE_ASIC_MEMORY_MACROS = 1'b0,
+  parameter bit ENABLE_DIGEST = 1'b1,
   localparam int DESC_WORD_W = 1 + PORT_W + RANK_WIDTH + SEQ_WIDTH +
                                CELL_COUNT_WIDTH + PAYLOAD_WIDTH +
                                SRAM_SLOT_W + BATCH_ID_W + BATCH_OFF_W,
@@ -327,6 +328,7 @@ module hestia_extmeta_tables #(
   logic [63:0] desc_rd_xor_c;
   logic [63:0] active_rd_xor_c;
   logic [63:0] payload_rd_xor_c;
+  logic [63:0] digest_q;
 
   logic [DESC_W-1:0] desc_free_wr_ptr_q;
   logic [DESC_W-1:0] desc_free_rd_ptr_q;
@@ -336,6 +338,8 @@ module hestia_extmeta_tables #(
   logic [ACTIVE_IDX_W-1:0] active_rd_idx_c;
   logic [ACTIVE_TAG_W-1:0] batch_append_tag_c;
   logic [ACTIVE_TAG_W-1:0] batch_query_tag_c;
+
+  assign digest = ENABLE_DIGEST ? digest_q : 64'd0;
 
   function automatic logic [ACTIVE_IDX_W-1:0] active_index(input logic [BATCH_ID_W-1:0] batch_i);
     begin
@@ -513,7 +517,7 @@ module hestia_extmeta_tables #(
       desc_free_rd_ptr_q <= '0;
       sram_free_wr_ptr_q <= '0;
       sram_free_rd_ptr_q <= '0;
-      digest <= '0;
+      digest_q <= '0;
     end else begin
       ready <= 1'b1;
       if (desc_free_valid) begin
@@ -528,12 +532,14 @@ module hestia_extmeta_tables #(
       if (sram_alloc_valid) begin
         sram_free_rd_ptr_q <= sram_free_rd_ptr_q + sram_alloc_cells[SRAM_SLOT_W-1:0];
       end
-      digest <= digest ^
-                desc_rd_xor_c ^
-                {{(64-DESC_W){1'b0}}, desc_free_rd_data} ^
-                {{(64-SRAM_SLOT_W){1'b0}}, sram_free_rd_data} ^
-                active_rd_xor_c ^
-                payload_rd_xor_c;
+      if (ENABLE_DIGEST) begin
+        digest_q <= digest_q ^
+                    desc_rd_xor_c ^
+                    {{(64-DESC_W){1'b0}}, desc_free_rd_data} ^
+                    {{(64-SRAM_SLOT_W){1'b0}}, sram_free_rd_data} ^
+                    active_rd_xor_c ^
+                    payload_rd_xor_c;
+      end
     end
   end
 endmodule
@@ -557,9 +563,6 @@ module hestia_core_ddr_bbq_extmeta #(
   parameter int POLICY_ALPHA_SHIFT_WIDTH = 4,
   parameter bit ENABLE_DDR_META_CHECK = 1'b0,
   parameter bit USE_ASIC_MEMORY_MACROS = 1'b0,
-  parameter bit ENABLE_OBSERVABILITY = 1'b1,
-  parameter bit PIPELINE_SCHEDULER_CANDIDATES = USE_ASIC_MEMORY_MACROS,
-  parameter bit PIPELINE_PORT_QUEUE_INPUTS = 1'b0,
   parameter logic [AXI_ADDR_WIDTH-1:0] DDR_BASE_ADDR = 64'h0,
   localparam int PORT_W = (PORTS <= 2) ? 1 : $clog2(PORTS),
   localparam int SRAM_SLOT_W = (SRAM_CELLS <= 2) ? 1 : $clog2(SRAM_CELLS),
@@ -574,8 +577,19 @@ module hestia_core_ddr_bbq_extmeta #(
   localparam int COUNT_BASE_W = (SRAM_COUNT_W > DDR_COUNT_W) ? SRAM_COUNT_W : DDR_COUNT_W,
   localparam int COUNT_BASE2_W = (COUNT_BASE_W > PACKET_COUNT_W) ? COUNT_BASE_W : PACKET_COUNT_W,
   localparam int COUNT_W = (COUNT_BASE2_W > CELL_COUNT_WIDTH) ? COUNT_BASE2_W : CELL_COUNT_WIDTH,
-  localparam int PAYLOAD_COPY_W = (PAYLOAD_WIDTH < DESC_W) ? PAYLOAD_WIDTH : DESC_W,
-  localparam int SCHED_PAIR_COUNT = (PORTS + 1) / 2
+  localparam int COUNT_LOW_W = BATCH_OFF_W + 1,
+  localparam int COUNT_MID_W =
+    (COUNT_W > (COUNT_LOW_W + 9)) ? 8 :
+    ((COUNT_W > (COUNT_LOW_W + 1)) ? (COUNT_W - COUNT_LOW_W - 1) : 1),
+  localparam int COUNT_HIGH_W = COUNT_W - COUNT_LOW_W - COUNT_MID_W,
+  localparam int SRAM_FREE_W = (SRAM_COUNT_W > CELL_COUNT_WIDTH) ? SRAM_COUNT_W : CELL_COUNT_WIDTH,
+  localparam int SRAM_FREE_LOW_W = BATCH_OFF_W + 1,
+  localparam int SRAM_FREE_MID_W =
+    (SRAM_FREE_W > (SRAM_FREE_LOW_W + 9)) ? 8 :
+    ((SRAM_FREE_W > (SRAM_FREE_LOW_W + 1)) ? (SRAM_FREE_W - SRAM_FREE_LOW_W - 1) : 1),
+  localparam int SRAM_FREE_HIGH_W = SRAM_FREE_W - SRAM_FREE_LOW_W - SRAM_FREE_MID_W,
+  localparam int SWAP_STAGE_PORTS = (PORTS + 1) / 2,
+  localparam int PAYLOAD_COPY_W = (PAYLOAD_WIDTH < DESC_W) ? PAYLOAD_WIDTH : DESC_W
 ) (
   input  logic                              clk,
   input  logic                              resetn,
@@ -665,7 +679,7 @@ module hestia_core_ddr_bbq_extmeta #(
   localparam int POLICY_OCCAMY_MAX = 2;
   localparam int POLICY_OBM = 3;
   localparam int POLICY_HYBRID_THEMIS = 4;
-  localparam logic [COUNT_W-1:0] SRAM_CELLS_COUNT = SRAM_CELLS;
+  localparam logic [SRAM_FREE_W-1:0] SRAM_CELLS_FREE_COUNT = SRAM_CELLS;
   localparam logic [COUNT_W-1:0] DDR_CELL_CAPACITY_COUNT = DDR_CELL_CAPACITY;
   localparam logic [COUNT_W-1:0] PACKET_SLOTS_COUNT = PACKET_SLOTS;
   localparam logic [COUNT_W-1:0] BATCH_SLOTS_COUNT = BATCH_SLOTS;
@@ -712,34 +726,17 @@ module hestia_core_ddr_bbq_extmeta #(
   logic [PORTS*CELL_COUNT_WIDTH-1:0] hbm_min_cell_count;
   logic [PORTS*BATCH_ID_W-1:0] hbm_min_batch_id;
   logic [PORTS*BATCH_OFF_W-1:0] hbm_min_batch_off;
-  logic [PORTS-1:0] sram_min_valid_raw;
-  logic [PORTS*RANK_WIDTH-1:0] sram_min_rank_raw;
-  logic [PORTS*SEQ_WIDTH-1:0] sram_min_seq_raw;
-  logic [PORTS*DESC_W-1:0] sram_min_desc_raw;
-  logic [PORTS*CELL_COUNT_WIDTH-1:0] sram_min_cell_count_raw;
-  logic [PORTS-1:0] sram_max_valid_raw;
-  logic [PORTS*RANK_WIDTH-1:0] sram_max_rank_raw;
-  logic [PORTS*SEQ_WIDTH-1:0] sram_max_seq_raw;
-  logic [PORTS*DESC_W-1:0] sram_max_desc_raw;
-  logic [PORTS*CELL_COUNT_WIDTH-1:0] sram_max_cell_count_raw;
-  logic [PORTS-1:0] hbm_min_valid_raw;
-  logic [PORTS*RANK_WIDTH-1:0] hbm_min_rank_raw;
-  logic [PORTS*SEQ_WIDTH-1:0] hbm_min_seq_raw;
-  logic [PORTS*DESC_W-1:0] hbm_min_desc_raw;
-  logic [PORTS*CELL_COUNT_WIDTH-1:0] hbm_min_cell_count_raw;
-  logic [PORTS*BATCH_ID_W-1:0] hbm_min_batch_id_raw;
-  logic [PORTS*BATCH_OFF_W-1:0] hbm_min_batch_off_raw;
-  logic [PORTS*COUNT_W-1:0] sram_occ_flat;
-  logic [PORTS*COUNT_W-1:0] hbm_occ_flat;
   logic [PORTS*COUNT_W-1:0] policy_sram_occ_flat_c;
-  logic [PORTS*64-1:0] queue_digest_flat;
+  logic [PORTS*COUNT_W-1:0] policy_sram_occ_flat_q;
+  logic [PORTS*COUNT_W-1:0] policy_hbm_occ_flat_c;
 
   logic [COUNT_W-1:0] sram_count_q [0:PORTS-1];
   logic [COUNT_W-1:0] hbm_count_q [0:PORTS-1];
   logic [COUNT_W-1:0] global_sram_occ_q;
   logic [COUNT_W-1:0] global_hbm_occ_q;
   logic [COUNT_W-1:0] desc_free_count_q;
-  logic [COUNT_W-1:0] sram_free_count_q;
+  logic [SRAM_FREE_W-1:0] sram_free_count_q;
+  logic [COUNT_W-1:0] sram_free_count_ext_c;
   logic [COUNT_W-1:0] batch_free_count_q;
   logic [COUNT_W-1:0] ddr_free_cell_count_q;
 
@@ -754,6 +751,7 @@ module hestia_core_ddr_bbq_extmeta #(
   logic [BATCH_OFF_W:0] open_batch_fill_q;
 
   logic [PORTS-1:0] out_valid_q;
+  logic [PORTS-1:0] out_busy_q;
   logic [PORTS*RANK_WIDTH-1:0] out_rank_q;
   logic [PORTS*SEQ_WIDTH-1:0] out_seq_q;
   logic [PORTS*CELL_COUNT_WIDTH-1:0] out_cell_count_q;
@@ -766,6 +764,7 @@ module hestia_core_ddr_bbq_extmeta #(
   logic [PORT_W-1:0] rd_rr_q;
 
   logic [COUNT_W-1:0] pkt_cells_c;
+  logic [SRAM_FREE_W-1:0] pkt_cells_sram_c;
   logic pkt_cells_ok_c;
   logic sram_can_fit_c;
   logic ddr_can_fit_c;
@@ -774,10 +773,19 @@ module hestia_core_ddr_bbq_extmeta #(
   logic [PORTS-1:0] occamy_over_threshold_c;
   logic occamy_reclaim_valid_c;
   logic [PORT_W-1:0] occamy_reclaim_port_c;
+  logic occamy_reclaim_fire_c;
   logic obm_longest_valid_c;
   logic [PORT_W-1:0] obm_longest_port_c;
   logic [COUNT_W-1:0] obm_longest_occ_c;
   logic obm_pkt_targets_longest_c;
+  logic [SWAP_STAGE_PORTS-1:0] obm_stage_valid_c;
+  logic [PORT_W-1:0] obm_stage_port_c [0:SWAP_STAGE_PORTS-1];
+  logic [COUNT_W-1:0] obm_stage_occ_c [0:SWAP_STAGE_PORTS-1];
+  logic [SWAP_STAGE_PORTS-1:0] obm_stage_valid_q;
+  logic [PORT_W-1:0] obm_stage_port_q [0:SWAP_STAGE_PORTS-1];
+  logic [COUNT_W-1:0] obm_stage_occ_q [0:SWAP_STAGE_PORTS-1];
+  logic obm_longest_valid_q;
+  logic obm_pkt_targets_longest_q;
   logic hybrid_policy_admit_c;
   logic [COUNT_W-1:0] hybrid_policy_threshold_c;
   logic [PORTS-1:0] hybrid_over_threshold_c;
@@ -788,33 +796,23 @@ module hestia_core_ddr_bbq_extmeta #(
   logic [PORT_W-1:0] hybrid_swapin_hint_port_c;
   logic [63:0] hybrid_policy_digest_c;
   logic [63:0] selected_policy_digest_c;
-  logic [63:0] observability_digest_c;
 
   logic ingress_fire_c;
   logic ingress_to_sram_c;
   logic ingress_to_hbm_c;
-  logic scheduler_pipe_busy_c;
-  logic candidate_refresh_q;
-  logic ingress_fire_s;
-  logic ingress_to_sram_s;
-  logic ingress_to_hbm_s;
-  logic [PORT_W-1:0] ingress_port_s;
-  logic [RANK_WIDTH-1:0] ingress_rank_s;
-  logic [SEQ_WIDTH-1:0] ingress_seq_s;
-  logic [CELL_COUNT_WIDTH-1:0] ingress_cells_raw_s;
-  logic [COUNT_W-1:0] ingress_cells_s;
-  logic [PAYLOAD_WIDTH-1:0] ingress_payload_s;
-  logic [DESC_W-1:0] ingress_desc_s;
-  logic [BATCH_ID_W-1:0] ingress_batch_s;
-  logic [BATCH_OFF_W-1:0] ingress_batch_off_s;
-  logic ingress_fire_q;
+  logic ingress_resource_ready_c;
+  logic ingress_ready_q;
+  logic ingress_to_sram_ready_q;
+  logic ingress_to_hbm_ready_q;
+  logic ingress_valid_q;
   logic ingress_to_sram_q;
   logic ingress_to_hbm_q;
   logic [PORT_W-1:0] ingress_port_q;
   logic [RANK_WIDTH-1:0] ingress_rank_q;
   logic [SEQ_WIDTH-1:0] ingress_seq_q;
   logic [CELL_COUNT_WIDTH-1:0] ingress_cells_raw_q;
-  logic [COUNT_W-1:0] ingress_cells_q;
+  logic [CELL_COUNT_WIDTH-1:0] ingress_cells_q;
+  logic [SRAM_FREE_W-1:0] ingress_cells_sram_q;
   logic [PAYLOAD_WIDTH-1:0] ingress_payload_q;
   logic [DESC_W-1:0] ingress_desc_q;
   logic [BATCH_ID_W-1:0] ingress_batch_q;
@@ -828,28 +826,34 @@ module hestia_core_ddr_bbq_extmeta #(
   logic [SEQ_WIDTH-1:0] deq_seq_c;
   logic [CELL_COUNT_WIDTH-1:0] deq_cells_raw_c;
   logic [COUNT_W-1:0] deq_cells_c;
+  logic [SRAM_FREE_W-1:0] deq_cells_sram_c;
   logic [BATCH_ID_W-1:0] deq_batch_c;
   logic [BATCH_OFF_W-1:0] deq_batch_off_c;
-  logic deq_fire_s;
-  logic [PORT_W-1:0] deq_port_s;
-  logic deq_from_sram_s;
-  logic [DESC_W-1:0] deq_desc_s;
-  logic [RANK_WIDTH-1:0] deq_rank_s;
-  logic [SEQ_WIDTH-1:0] deq_seq_s;
-  logic [CELL_COUNT_WIDTH-1:0] deq_cells_raw_s;
-  logic [COUNT_W-1:0] deq_cells_s;
-  logic [BATCH_ID_W-1:0] deq_batch_s;
-  logic [BATCH_OFF_W-1:0] deq_batch_off_s;
-  logic deq_fire_q;
-  logic [PORT_W-1:0] deq_port_q_stage;
+  logic deq_select_valid_q;
+  logic [PORT_W-1:0] deq_select_port_q;
+  logic deq_stage_valid_q;
+  logic [PORT_W-1:0] deq_stage_port_q;
+  logic deq_stage_from_sram_q;
+  logic [DESC_W-1:0] deq_stage_desc_q;
+  logic [RANK_WIDTH-1:0] deq_stage_rank_q;
+  logic [SEQ_WIDTH-1:0] deq_stage_seq_q;
+  logic [CELL_COUNT_WIDTH-1:0] deq_stage_cells_raw_q;
+  logic [CELL_COUNT_WIDTH-1:0] deq_stage_cells_q;
+  logic [SRAM_FREE_W-1:0] deq_stage_cells_sram_q;
+  logic [BATCH_ID_W-1:0] deq_stage_batch_q;
+  logic [BATCH_OFF_W-1:0] deq_stage_batch_off_q;
+  logic deq_valid_q;
+  logic deq_issue_open_q;
+  logic [PORT_W-1:0] deq_port_q;
   logic deq_from_sram_q;
-  logic [DESC_W-1:0] deq_desc_q_stage;
-  logic [RANK_WIDTH-1:0] deq_rank_q_stage;
-  logic [SEQ_WIDTH-1:0] deq_seq_q_stage;
-  logic [CELL_COUNT_WIDTH-1:0] deq_cells_raw_q_stage;
-  logic [COUNT_W-1:0] deq_cells_q_stage;
-  logic [BATCH_ID_W-1:0] deq_batch_q_stage;
-  logic [BATCH_OFF_W-1:0] deq_batch_off_q_stage;
+  logic [DESC_W-1:0] deq_desc_q;
+  logic [RANK_WIDTH-1:0] deq_rank_q;
+  logic [SEQ_WIDTH-1:0] deq_seq_q;
+  logic [CELL_COUNT_WIDTH-1:0] deq_cells_raw_q;
+  logic [CELL_COUNT_WIDTH-1:0] deq_cells_q;
+  logic [SRAM_FREE_W-1:0] deq_cells_sram_q;
+  logic [BATCH_ID_W-1:0] deq_batch_q;
+  logic [BATCH_OFF_W-1:0] deq_batch_off_q;
 
   logic swapout_valid_c;
   logic [PORT_W-1:0] swapout_port_c;
@@ -858,20 +862,27 @@ module hestia_core_ddr_bbq_extmeta #(
   logic [SEQ_WIDTH-1:0] swapout_seq_c;
   logic [CELL_COUNT_WIDTH-1:0] swapout_cells_raw_c;
   logic [COUNT_W-1:0] swapout_cells_c;
-  logic swapout_valid_s;
-  logic [PORT_W-1:0] swapout_port_s;
-  logic [DESC_W-1:0] swapout_desc_s;
-  logic [RANK_WIDTH-1:0] swapout_rank_s;
-  logic [SEQ_WIDTH-1:0] swapout_seq_s;
-  logic [CELL_COUNT_WIDTH-1:0] swapout_cells_raw_s;
-  logic [COUNT_W-1:0] swapout_cells_s;
+  logic [SRAM_FREE_W-1:0] swapout_cells_sram_c;
+  logic [SWAP_STAGE_PORTS-1:0] swapout_stage_valid_c;
+  logic [PORT_W-1:0] swapout_stage_port_c [0:SWAP_STAGE_PORTS-1];
+  logic [DESC_W-1:0] swapout_stage_desc_c [0:SWAP_STAGE_PORTS-1];
+  logic [RANK_WIDTH-1:0] swapout_stage_rank_c [0:SWAP_STAGE_PORTS-1];
+  logic [SEQ_WIDTH-1:0] swapout_stage_seq_c [0:SWAP_STAGE_PORTS-1];
+  logic [CELL_COUNT_WIDTH-1:0] swapout_stage_cells_raw_c [0:SWAP_STAGE_PORTS-1];
+  logic [SWAP_STAGE_PORTS-1:0] swapout_stage_valid_q;
+  logic [PORT_W-1:0] swapout_stage_port_q [0:SWAP_STAGE_PORTS-1];
+  logic [DESC_W-1:0] swapout_stage_desc_q [0:SWAP_STAGE_PORTS-1];
+  logic [RANK_WIDTH-1:0] swapout_stage_rank_q [0:SWAP_STAGE_PORTS-1];
+  logic [SEQ_WIDTH-1:0] swapout_stage_seq_q [0:SWAP_STAGE_PORTS-1];
+  logic [CELL_COUNT_WIDTH-1:0] swapout_stage_cells_raw_q [0:SWAP_STAGE_PORTS-1];
   logic swapout_valid_q;
   logic [PORT_W-1:0] swapout_port_q;
   logic [DESC_W-1:0] swapout_desc_q;
   logic [RANK_WIDTH-1:0] swapout_rank_q;
   logic [SEQ_WIDTH-1:0] swapout_seq_q;
   logic [CELL_COUNT_WIDTH-1:0] swapout_cells_raw_q;
-  logic [COUNT_W-1:0] swapout_cells_q;
+  logic [CELL_COUNT_WIDTH-1:0] swapout_cells_q;
+  logic [SRAM_FREE_W-1:0] swapout_cells_sram_q;
   logic swapin_valid_c;
   logic [PORT_W-1:0] swapin_port_c;
   logic [DESC_W-1:0] swapin_desc_c;
@@ -879,68 +890,45 @@ module hestia_core_ddr_bbq_extmeta #(
   logic [SEQ_WIDTH-1:0] swapin_seq_c;
   logic [CELL_COUNT_WIDTH-1:0] swapin_cells_raw_c;
   logic [COUNT_W-1:0] swapin_cells_c;
+  logic [SRAM_FREE_W-1:0] swapin_cells_sram_c;
   logic [BATCH_ID_W-1:0] swapin_batch_c;
   logic [BATCH_OFF_W-1:0] swapin_batch_off_c;
-  logic swapin_valid_s;
-  logic [PORT_W-1:0] swapin_port_s;
-  logic [DESC_W-1:0] swapin_desc_s;
-  logic [RANK_WIDTH-1:0] swapin_rank_s;
-  logic [SEQ_WIDTH-1:0] swapin_seq_s;
-  logic [CELL_COUNT_WIDTH-1:0] swapin_cells_raw_s;
-  logic [COUNT_W-1:0] swapin_cells_s;
-  logic [BATCH_ID_W-1:0] swapin_batch_s;
-  logic [BATCH_OFF_W-1:0] swapin_batch_off_s;
+  logic [SWAP_STAGE_PORTS-1:0] swapin_stage_valid_c;
+  logic [PORT_W-1:0] swapin_stage_port_c [0:SWAP_STAGE_PORTS-1];
+  logic [DESC_W-1:0] swapin_stage_desc_c [0:SWAP_STAGE_PORTS-1];
+  logic [RANK_WIDTH-1:0] swapin_stage_rank_c [0:SWAP_STAGE_PORTS-1];
+  logic [SEQ_WIDTH-1:0] swapin_stage_seq_c [0:SWAP_STAGE_PORTS-1];
+  logic [CELL_COUNT_WIDTH-1:0] swapin_stage_cells_raw_c [0:SWAP_STAGE_PORTS-1];
+  logic [BATCH_ID_W-1:0] swapin_stage_batch_c [0:SWAP_STAGE_PORTS-1];
+  logic [BATCH_OFF_W-1:0] swapin_stage_batch_off_c [0:SWAP_STAGE_PORTS-1];
+  logic [SWAP_STAGE_PORTS-1:0] swapin_stage_valid_q;
+  logic [PORT_W-1:0] swapin_stage_port_q [0:SWAP_STAGE_PORTS-1];
+  logic [DESC_W-1:0] swapin_stage_desc_q [0:SWAP_STAGE_PORTS-1];
+  logic [RANK_WIDTH-1:0] swapin_stage_rank_q [0:SWAP_STAGE_PORTS-1];
+  logic [SEQ_WIDTH-1:0] swapin_stage_seq_q [0:SWAP_STAGE_PORTS-1];
+  logic [CELL_COUNT_WIDTH-1:0] swapin_stage_cells_raw_q [0:SWAP_STAGE_PORTS-1];
+  logic [BATCH_ID_W-1:0] swapin_stage_batch_q [0:SWAP_STAGE_PORTS-1];
+  logic [BATCH_OFF_W-1:0] swapin_stage_batch_off_q [0:SWAP_STAGE_PORTS-1];
   logic swapin_valid_q;
   logic [PORT_W-1:0] swapin_port_q;
   logic [DESC_W-1:0] swapin_desc_q;
   logic [RANK_WIDTH-1:0] swapin_rank_q;
   logic [SEQ_WIDTH-1:0] swapin_seq_q;
   logic [CELL_COUNT_WIDTH-1:0] swapin_cells_raw_q;
-  logic [COUNT_W-1:0] swapin_cells_q;
+  logic [CELL_COUNT_WIDTH-1:0] swapin_cells_q;
+  logic [SRAM_FREE_W-1:0] swapin_cells_sram_q;
   logic [BATCH_ID_W-1:0] swapin_batch_q;
   logic [BATCH_OFF_W-1:0] swapin_batch_off_q;
-  logic swapin_fire_exec_c;
-  logic swapout_fire_exec_c;
-
-  logic [SCHED_PAIR_COUNT-1:0] swapout_pair_valid_c;
-  logic [SCHED_PAIR_COUNT*PORT_W-1:0] swapout_pair_port_c;
-  logic [SCHED_PAIR_COUNT*DESC_W-1:0] swapout_pair_desc_c;
-  logic [SCHED_PAIR_COUNT*RANK_WIDTH-1:0] swapout_pair_rank_c;
-  logic [SCHED_PAIR_COUNT*SEQ_WIDTH-1:0] swapout_pair_seq_c;
-  logic [SCHED_PAIR_COUNT*CELL_COUNT_WIDTH-1:0] swapout_pair_cells_raw_c;
-  logic [SCHED_PAIR_COUNT-1:0] swapout_pair_valid_q;
-  logic [SCHED_PAIR_COUNT*PORT_W-1:0] swapout_pair_port_q;
-  logic [SCHED_PAIR_COUNT*DESC_W-1:0] swapout_pair_desc_q;
-  logic [SCHED_PAIR_COUNT*RANK_WIDTH-1:0] swapout_pair_rank_q;
-  logic [SCHED_PAIR_COUNT*SEQ_WIDTH-1:0] swapout_pair_seq_q;
-  logic [SCHED_PAIR_COUNT*CELL_COUNT_WIDTH-1:0] swapout_pair_cells_raw_q;
-
-  logic [SCHED_PAIR_COUNT-1:0] swapin_pair_valid_c;
-  logic [SCHED_PAIR_COUNT*PORT_W-1:0] swapin_pair_port_c;
-  logic [SCHED_PAIR_COUNT*DESC_W-1:0] swapin_pair_desc_c;
-  logic [SCHED_PAIR_COUNT*RANK_WIDTH-1:0] swapin_pair_rank_c;
-  logic [SCHED_PAIR_COUNT*SEQ_WIDTH-1:0] swapin_pair_seq_c;
-  logic [SCHED_PAIR_COUNT*CELL_COUNT_WIDTH-1:0] swapin_pair_cells_raw_c;
-  logic [SCHED_PAIR_COUNT*BATCH_ID_W-1:0] swapin_pair_batch_c;
-  logic [SCHED_PAIR_COUNT*BATCH_OFF_W-1:0] swapin_pair_batch_off_c;
-  logic [SCHED_PAIR_COUNT-1:0] swapin_pair_valid_q;
-  logic [SCHED_PAIR_COUNT*PORT_W-1:0] swapin_pair_port_q;
-  logic [SCHED_PAIR_COUNT*DESC_W-1:0] swapin_pair_desc_q;
-  logic [SCHED_PAIR_COUNT*RANK_WIDTH-1:0] swapin_pair_rank_q;
-  logic [SCHED_PAIR_COUNT*SEQ_WIDTH-1:0] swapin_pair_seq_q;
-  logic [SCHED_PAIR_COUNT*CELL_COUNT_WIDTH-1:0] swapin_pair_cells_raw_q;
-  logic [SCHED_PAIR_COUNT*BATCH_ID_W-1:0] swapin_pair_batch_q;
-  logic [SCHED_PAIR_COUNT*BATCH_OFF_W-1:0] swapin_pair_batch_off_q;
 
   wr_state_t wr_state_q;
   logic [BATCH_ID_W-1:0] wr_batch_q;
-  logic [BATCH_OFF_W:0] wr_beat_q;
   logic [DESC_W-1:0] wr_desc_q;
   logic [RANK_WIDTH-1:0] wr_rank_q;
   logic [SEQ_WIDTH-1:0] wr_seq_q;
   logic [CELL_COUNT_WIDTH-1:0] wr_cells_raw_q;
   logic [BATCH_OFF_W-1:0] wr_batch_off_q;
   logic [PAYLOAD_WIDTH-1:0] wr_payload_q;
+  logic [BATCH_OFF_W:0] wr_beat_q;
   logic wr_start_c;
   logic [BATCH_ID_W-1:0] wr_start_batch_c;
   logic [DESC_W-1:0] wr_start_desc_c;
@@ -998,6 +986,7 @@ module hestia_core_ddr_bbq_extmeta #(
   logic meta_batch_query_committed;
   logic meta_batch_release_valid_q;
   logic [BATCH_ID_W-1:0] meta_batch_release_id_q;
+  logic stat_drop_pending_q;
 
   function automatic logic rank_less(
     input logic [RANK_WIDTH-1:0] a_rank,
@@ -1049,6 +1038,122 @@ module hestia_core_ddr_bbq_extmeta #(
   );
     begin
       cell_count_count = {{(COUNT_W-CELL_COUNT_WIDTH){1'b0}}, cells_i};
+    end
+  endfunction
+
+  function automatic logic [SRAM_FREE_W-1:0] cell_count_sram_free(
+    input logic [CELL_COUNT_WIDTH-1:0] cells_i
+  );
+    begin
+      cell_count_sram_free = {{(SRAM_FREE_W-CELL_COUNT_WIDTH){1'b0}}, cells_i};
+    end
+  endfunction
+
+  function automatic logic [SRAM_FREE_W-1:0] sram_free_add_small(
+    input logic [SRAM_FREE_W-1:0] count_i,
+    input logic [SRAM_FREE_W-1:0] cells_i
+  );
+    logic [SRAM_FREE_LOW_W:0] low_sum_v;
+    logic [SRAM_FREE_MID_W-1:0] mid_v;
+    logic [SRAM_FREE_MID_W-1:0] mid_inc_v;
+    logic [SRAM_FREE_HIGH_W-1:0] high_v;
+    logic [SRAM_FREE_HIGH_W-1:0] high_inc_v;
+    logic mid_carry_v;
+    begin
+      low_sum_v = {1'b0, count_i[SRAM_FREE_LOW_W-1:0]} +
+                  {1'b0, cells_i[SRAM_FREE_LOW_W-1:0]};
+      mid_v = count_i[SRAM_FREE_LOW_W +: SRAM_FREE_MID_W];
+      high_v = count_i[SRAM_FREE_LOW_W+SRAM_FREE_MID_W +: SRAM_FREE_HIGH_W];
+      mid_inc_v = mid_v + {{(SRAM_FREE_MID_W-1){1'b0}}, 1'b1};
+      high_inc_v = high_v + {{(SRAM_FREE_HIGH_W-1){1'b0}}, 1'b1};
+      mid_carry_v = &mid_v;
+
+      sram_free_add_small[SRAM_FREE_LOW_W-1:0] = low_sum_v[SRAM_FREE_LOW_W-1:0];
+      sram_free_add_small[SRAM_FREE_LOW_W +: SRAM_FREE_MID_W] =
+        low_sum_v[SRAM_FREE_LOW_W] ? mid_inc_v : mid_v;
+      sram_free_add_small[SRAM_FREE_LOW_W+SRAM_FREE_MID_W +: SRAM_FREE_HIGH_W] =
+        (low_sum_v[SRAM_FREE_LOW_W] && mid_carry_v) ? high_inc_v : high_v;
+    end
+  endfunction
+
+  function automatic logic [SRAM_FREE_W-1:0] sram_free_sub_small(
+    input logic [SRAM_FREE_W-1:0] count_i,
+    input logic [SRAM_FREE_W-1:0] cells_i
+  );
+    logic [SRAM_FREE_LOW_W:0] low_diff_v;
+    logic [SRAM_FREE_MID_W-1:0] mid_v;
+    logic [SRAM_FREE_MID_W-1:0] mid_dec_v;
+    logic [SRAM_FREE_HIGH_W-1:0] high_v;
+    logic [SRAM_FREE_HIGH_W-1:0] high_dec_v;
+    logic mid_borrow_v;
+    begin
+      low_diff_v = {1'b0, count_i[SRAM_FREE_LOW_W-1:0]} -
+                   {1'b0, cells_i[SRAM_FREE_LOW_W-1:0]};
+      mid_v = count_i[SRAM_FREE_LOW_W +: SRAM_FREE_MID_W];
+      high_v = count_i[SRAM_FREE_LOW_W+SRAM_FREE_MID_W +: SRAM_FREE_HIGH_W];
+      mid_dec_v = mid_v - {{(SRAM_FREE_MID_W-1){1'b0}}, 1'b1};
+      high_dec_v = high_v - {{(SRAM_FREE_HIGH_W-1){1'b0}}, 1'b1};
+      mid_borrow_v = ~(|mid_v);
+
+      sram_free_sub_small[SRAM_FREE_LOW_W-1:0] = low_diff_v[SRAM_FREE_LOW_W-1:0];
+      sram_free_sub_small[SRAM_FREE_LOW_W +: SRAM_FREE_MID_W] =
+        low_diff_v[SRAM_FREE_LOW_W] ? mid_dec_v : mid_v;
+      sram_free_sub_small[SRAM_FREE_LOW_W+SRAM_FREE_MID_W +: SRAM_FREE_HIGH_W] =
+        (low_diff_v[SRAM_FREE_LOW_W] && mid_borrow_v) ? high_dec_v : high_v;
+    end
+  endfunction
+
+  function automatic logic [COUNT_W-1:0] count_add_small(
+    input logic [COUNT_W-1:0] count_i,
+    input logic [COUNT_W-1:0] cells_i
+  );
+    logic [COUNT_LOW_W:0] low_sum_v;
+    logic [COUNT_MID_W-1:0] mid_v;
+    logic [COUNT_MID_W-1:0] mid_inc_v;
+    logic [COUNT_HIGH_W-1:0] high_v;
+    logic [COUNT_HIGH_W-1:0] high_inc_v;
+    logic mid_carry_v;
+    begin
+      low_sum_v = {1'b0, count_i[COUNT_LOW_W-1:0]} +
+                  {1'b0, cells_i[COUNT_LOW_W-1:0]};
+      mid_v = count_i[COUNT_LOW_W +: COUNT_MID_W];
+      high_v = count_i[COUNT_LOW_W+COUNT_MID_W +: COUNT_HIGH_W];
+      mid_inc_v = mid_v + {{(COUNT_MID_W-1){1'b0}}, 1'b1};
+      high_inc_v = high_v + {{(COUNT_HIGH_W-1){1'b0}}, 1'b1};
+      mid_carry_v = &mid_v;
+
+      count_add_small[COUNT_LOW_W-1:0] = low_sum_v[COUNT_LOW_W-1:0];
+      count_add_small[COUNT_LOW_W +: COUNT_MID_W] =
+        low_sum_v[COUNT_LOW_W] ? mid_inc_v : mid_v;
+      count_add_small[COUNT_LOW_W+COUNT_MID_W +: COUNT_HIGH_W] =
+        (low_sum_v[COUNT_LOW_W] && mid_carry_v) ? high_inc_v : high_v;
+    end
+  endfunction
+
+  function automatic logic [COUNT_W-1:0] count_sub_small(
+    input logic [COUNT_W-1:0] count_i,
+    input logic [COUNT_W-1:0] cells_i
+  );
+    logic [COUNT_LOW_W:0] low_diff_v;
+    logic [COUNT_MID_W-1:0] mid_v;
+    logic [COUNT_MID_W-1:0] mid_dec_v;
+    logic [COUNT_HIGH_W-1:0] high_v;
+    logic [COUNT_HIGH_W-1:0] high_dec_v;
+    logic mid_borrow_v;
+    begin
+      low_diff_v = {1'b0, count_i[COUNT_LOW_W-1:0]} -
+                   {1'b0, cells_i[COUNT_LOW_W-1:0]};
+      mid_v = count_i[COUNT_LOW_W +: COUNT_MID_W];
+      high_v = count_i[COUNT_LOW_W+COUNT_MID_W +: COUNT_HIGH_W];
+      mid_dec_v = mid_v - {{(COUNT_MID_W-1){1'b0}}, 1'b1};
+      high_dec_v = high_v - {{(COUNT_HIGH_W-1){1'b0}}, 1'b1};
+      mid_borrow_v = ~(|mid_v);
+
+      count_sub_small[COUNT_LOW_W-1:0] = low_diff_v[COUNT_LOW_W-1:0];
+      count_sub_small[COUNT_LOW_W +: COUNT_MID_W] =
+        low_diff_v[COUNT_LOW_W] ? mid_dec_v : mid_v;
+      count_sub_small[COUNT_LOW_W+COUNT_MID_W +: COUNT_HIGH_W] =
+        (low_diff_v[COUNT_LOW_W] && mid_borrow_v) ? high_dec_v : high_v;
     end
   endfunction
 
@@ -1130,8 +1235,11 @@ module hestia_core_ddr_bbq_extmeta #(
         .BATCH_OFF_W(BATCH_OFF_W),
         .BBQ_BITMAP_WIDTH(BBQ_BITMAP_WIDTH),
         .OCC_WIDTH(COUNT_W),
-        .INPUT_PIPELINE(PIPELINE_PORT_QUEUE_INPUTS),
-        .ENABLE_DIGEST(ENABLE_OBSERVABILITY)
+        .TRACK_OCCUPANCY(1'b0),
+        .ENABLE_DIGEST(1'b0),
+        .TRACK_SRAM_MAX(POLICY_MODE != POLICY_DT),
+        .FAST_RANK_COMPARE(1'b1),
+        .INPUT_PIPELINE(1'b1)
       ) port_q (
         .clk(clk),
         .resetn(resetn),
@@ -1144,326 +1252,97 @@ module hestia_core_ddr_bbq_extmeta #(
         .op_desc(port_op_desc[gp*DESC_W +: DESC_W]),
         .op_batch_id(port_op_batch_id[gp*BATCH_ID_W +: BATCH_ID_W]),
         .op_batch_off(port_op_batch_off[gp*BATCH_OFF_W +: BATCH_OFF_W]),
-        .sram_min_valid(sram_min_valid_raw[gp]),
-        .sram_min_rank(sram_min_rank_raw[gp*RANK_WIDTH +: RANK_WIDTH]),
-        .sram_min_seq(sram_min_seq_raw[gp*SEQ_WIDTH +: SEQ_WIDTH]),
-        .sram_min_desc(sram_min_desc_raw[gp*DESC_W +: DESC_W]),
-        .sram_min_cell_count(sram_min_cell_count_raw[gp*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH]),
-        .sram_max_valid(sram_max_valid_raw[gp]),
-        .sram_max_rank(sram_max_rank_raw[gp*RANK_WIDTH +: RANK_WIDTH]),
-        .sram_max_seq(sram_max_seq_raw[gp*SEQ_WIDTH +: SEQ_WIDTH]),
-        .sram_max_desc(sram_max_desc_raw[gp*DESC_W +: DESC_W]),
-        .sram_max_cell_count(sram_max_cell_count_raw[gp*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH]),
-        .ddr_min_valid(hbm_min_valid_raw[gp]),
-        .ddr_min_rank(hbm_min_rank_raw[gp*RANK_WIDTH +: RANK_WIDTH]),
-        .ddr_min_seq(hbm_min_seq_raw[gp*SEQ_WIDTH +: SEQ_WIDTH]),
-        .ddr_min_desc(hbm_min_desc_raw[gp*DESC_W +: DESC_W]),
-        .ddr_min_cell_count(hbm_min_cell_count_raw[gp*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH]),
-        .ddr_min_batch_id(hbm_min_batch_id_raw[gp*BATCH_ID_W +: BATCH_ID_W]),
-        .ddr_min_batch_off(hbm_min_batch_off_raw[gp*BATCH_OFF_W +: BATCH_OFF_W]),
-        .sram_occupancy(sram_occ_flat[gp*COUNT_W +: COUNT_W]),
-        .ddr_occupancy(hbm_occ_flat[gp*COUNT_W +: COUNT_W]),
-        .digest(queue_digest_flat[gp*64 +: 64])
+        .sram_min_valid(sram_min_valid[gp]),
+        .sram_min_rank(sram_min_rank[gp*RANK_WIDTH +: RANK_WIDTH]),
+        .sram_min_seq(sram_min_seq[gp*SEQ_WIDTH +: SEQ_WIDTH]),
+        .sram_min_desc(sram_min_desc[gp*DESC_W +: DESC_W]),
+        .sram_min_cell_count(sram_min_cell_count[gp*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH]),
+        .sram_max_valid(sram_max_valid[gp]),
+        .sram_max_rank(sram_max_rank[gp*RANK_WIDTH +: RANK_WIDTH]),
+        .sram_max_seq(sram_max_seq[gp*SEQ_WIDTH +: SEQ_WIDTH]),
+        .sram_max_desc(sram_max_desc[gp*DESC_W +: DESC_W]),
+        .sram_max_cell_count(sram_max_cell_count[gp*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH]),
+        .ddr_min_valid(hbm_min_valid[gp]),
+        .ddr_min_rank(hbm_min_rank[gp*RANK_WIDTH +: RANK_WIDTH]),
+        .ddr_min_seq(hbm_min_seq[gp*SEQ_WIDTH +: SEQ_WIDTH]),
+        .ddr_min_desc(hbm_min_desc[gp*DESC_W +: DESC_W]),
+        .ddr_min_cell_count(hbm_min_cell_count[gp*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH]),
+        .ddr_min_batch_id(hbm_min_batch_id[gp*BATCH_ID_W +: BATCH_ID_W]),
+        .ddr_min_batch_off(hbm_min_batch_off[gp*BATCH_OFF_W +: BATCH_OFF_W]),
+        .sram_occupancy(),
+        .ddr_occupancy(),
+        .digest()
       );
 
       assign dbg_sram_count_flat[gp*16 +: 16] = sat16(sram_count_q[gp]);
       assign dbg_hbm_count_flat[gp*16 +: 16] = sat16(hbm_count_q[gp]);
       assign policy_sram_occ_flat_c[gp*COUNT_W +: COUNT_W] = sram_count_q[gp];
+      assign policy_hbm_occ_flat_c[gp*COUNT_W +: COUNT_W] = hbm_count_q[gp];
     end
   endgenerate
 
   generate
-    if (PIPELINE_SCHEDULER_CANDIDATES) begin : gen_port_candidate_registers
-      always_ff @(posedge clk) begin
-        if (!resetn) begin
-          sram_min_valid <= '0;
-          sram_min_rank <= '0;
-          sram_min_seq <= '0;
-          sram_min_desc <= '0;
-          sram_min_cell_count <= '0;
-          sram_max_valid <= '0;
-          sram_max_rank <= '0;
-          sram_max_seq <= '0;
-          sram_max_desc <= '0;
-          sram_max_cell_count <= '0;
-          hbm_min_valid <= '0;
-          hbm_min_rank <= '0;
-          hbm_min_seq <= '0;
-          hbm_min_desc <= '0;
-          hbm_min_cell_count <= '0;
-          hbm_min_batch_id <= '0;
-          hbm_min_batch_off <= '0;
-        end else begin
-          sram_min_valid <= sram_min_valid_raw;
-          sram_min_rank <= sram_min_rank_raw;
-          sram_min_seq <= sram_min_seq_raw;
-          sram_min_desc <= sram_min_desc_raw;
-          sram_min_cell_count <= sram_min_cell_count_raw;
-          sram_max_valid <= sram_max_valid_raw;
-          sram_max_rank <= sram_max_rank_raw;
-          sram_max_seq <= sram_max_seq_raw;
-          sram_max_desc <= sram_max_desc_raw;
-          sram_max_cell_count <= sram_max_cell_count_raw;
-          hbm_min_valid <= hbm_min_valid_raw;
-          hbm_min_rank <= hbm_min_rank_raw;
-          hbm_min_seq <= hbm_min_seq_raw;
-          hbm_min_desc <= hbm_min_desc_raw;
-          hbm_min_cell_count <= hbm_min_cell_count_raw;
-          hbm_min_batch_id <= hbm_min_batch_id_raw;
-          hbm_min_batch_off <= hbm_min_batch_off_raw;
-        end
-      end
-    end else begin : gen_port_candidate_passthrough
-      assign sram_min_valid = sram_min_valid_raw;
-      assign sram_min_rank = sram_min_rank_raw;
-      assign sram_min_seq = sram_min_seq_raw;
-      assign sram_min_desc = sram_min_desc_raw;
-      assign sram_min_cell_count = sram_min_cell_count_raw;
-      assign sram_max_valid = sram_max_valid_raw;
-      assign sram_max_rank = sram_max_rank_raw;
-      assign sram_max_seq = sram_max_seq_raw;
-      assign sram_max_desc = sram_max_desc_raw;
-      assign sram_max_cell_count = sram_max_cell_count_raw;
-      assign hbm_min_valid = hbm_min_valid_raw;
-      assign hbm_min_rank = hbm_min_rank_raw;
-      assign hbm_min_seq = hbm_min_seq_raw;
-      assign hbm_min_desc = hbm_min_desc_raw;
-      assign hbm_min_cell_count = hbm_min_cell_count_raw;
-      assign hbm_min_batch_id = hbm_min_batch_id_raw;
-      assign hbm_min_batch_off = hbm_min_batch_off_raw;
-    end
-  endgenerate
-
-  generate
-    if (PIPELINE_SCHEDULER_CANDIDATES) begin : gen_candidate_pair_reduce
-      always_comb begin
-        swapout_pair_valid_c = '0;
-        swapout_pair_port_c = '0;
-        swapout_pair_desc_c = '0;
-        swapout_pair_rank_c = '0;
-        swapout_pair_seq_c = '0;
-        swapout_pair_cells_raw_c = '0;
-        swapin_pair_valid_c = '0;
-        swapin_pair_port_c = '0;
-        swapin_pair_desc_c = '0;
-        swapin_pair_rank_c = '1;
-        swapin_pair_seq_c = '1;
-        swapin_pair_cells_raw_c = '0;
-        swapin_pair_batch_c = '0;
-        swapin_pair_batch_off_c = '0;
-
-        for (int gi = 0; gi < SCHED_PAIR_COUNT; gi = gi + 1) begin
-          int pi0;
-          int pi1;
-          pi0 = gi * 2;
-          pi1 = pi0 + 1;
-
-          if (sram_max_valid_raw[pi0] &&
-              ((POLICY_MODE != POLICY_HYBRID_THEMIS) || hybrid_over_threshold_c[pi0])) begin
-            swapout_pair_valid_c[gi] = 1'b1;
-            swapout_pair_port_c[gi*PORT_W +: PORT_W] = PORT_W'(pi0);
-            swapout_pair_desc_c[gi*DESC_W +: DESC_W] =
-              sram_max_desc_raw[pi0*DESC_W +: DESC_W];
-            swapout_pair_rank_c[gi*RANK_WIDTH +: RANK_WIDTH] =
-              sram_max_rank_raw[pi0*RANK_WIDTH +: RANK_WIDTH];
-            swapout_pair_seq_c[gi*SEQ_WIDTH +: SEQ_WIDTH] =
-              sram_max_seq_raw[pi0*SEQ_WIDTH +: SEQ_WIDTH];
-            swapout_pair_cells_raw_c[gi*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH] =
-              sram_max_cell_count_raw[pi0*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH];
-          end
-          if ((pi1 < PORTS) &&
-              sram_max_valid_raw[pi1] &&
-              ((POLICY_MODE != POLICY_HYBRID_THEMIS) || hybrid_over_threshold_c[pi1]) &&
-              (!swapout_pair_valid_c[gi] ||
-               rank_greater(sram_max_rank_raw[pi1*RANK_WIDTH +: RANK_WIDTH],
-                            sram_max_seq_raw[pi1*SEQ_WIDTH +: SEQ_WIDTH],
-                            swapout_pair_rank_c[gi*RANK_WIDTH +: RANK_WIDTH],
-                            swapout_pair_seq_c[gi*SEQ_WIDTH +: SEQ_WIDTH]))) begin
-            swapout_pair_valid_c[gi] = 1'b1;
-            swapout_pair_port_c[gi*PORT_W +: PORT_W] = PORT_W'(pi1);
-            swapout_pair_desc_c[gi*DESC_W +: DESC_W] =
-              sram_max_desc_raw[pi1*DESC_W +: DESC_W];
-            swapout_pair_rank_c[gi*RANK_WIDTH +: RANK_WIDTH] =
-              sram_max_rank_raw[pi1*RANK_WIDTH +: RANK_WIDTH];
-            swapout_pair_seq_c[gi*SEQ_WIDTH +: SEQ_WIDTH] =
-              sram_max_seq_raw[pi1*SEQ_WIDTH +: SEQ_WIDTH];
-            swapout_pair_cells_raw_c[gi*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH] =
-              sram_max_cell_count_raw[pi1*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH];
-          end
-
-          if (hbm_min_valid_raw[pi0] &&
-              ((POLICY_MODE != POLICY_HYBRID_THEMIS) || hybrid_under_threshold_c[pi0])) begin
-            swapin_pair_valid_c[gi] = 1'b1;
-            swapin_pair_port_c[gi*PORT_W +: PORT_W] = PORT_W'(pi0);
-            swapin_pair_desc_c[gi*DESC_W +: DESC_W] =
-              hbm_min_desc_raw[pi0*DESC_W +: DESC_W];
-            swapin_pair_rank_c[gi*RANK_WIDTH +: RANK_WIDTH] =
-              hbm_min_rank_raw[pi0*RANK_WIDTH +: RANK_WIDTH];
-            swapin_pair_seq_c[gi*SEQ_WIDTH +: SEQ_WIDTH] =
-              hbm_min_seq_raw[pi0*SEQ_WIDTH +: SEQ_WIDTH];
-            swapin_pair_cells_raw_c[gi*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH] =
-              hbm_min_cell_count_raw[pi0*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH];
-            swapin_pair_batch_c[gi*BATCH_ID_W +: BATCH_ID_W] =
-              hbm_min_batch_id_raw[pi0*BATCH_ID_W +: BATCH_ID_W];
-            swapin_pair_batch_off_c[gi*BATCH_OFF_W +: BATCH_OFF_W] =
-              hbm_min_batch_off_raw[pi0*BATCH_OFF_W +: BATCH_OFF_W];
-          end
-          if ((pi1 < PORTS) &&
-              hbm_min_valid_raw[pi1] &&
-              ((POLICY_MODE != POLICY_HYBRID_THEMIS) || hybrid_under_threshold_c[pi1]) &&
-              (!swapin_pair_valid_c[gi] ||
-               rank_less(hbm_min_rank_raw[pi1*RANK_WIDTH +: RANK_WIDTH],
-                         hbm_min_seq_raw[pi1*SEQ_WIDTH +: SEQ_WIDTH],
-                         swapin_pair_rank_c[gi*RANK_WIDTH +: RANK_WIDTH],
-                         swapin_pair_seq_c[gi*SEQ_WIDTH +: SEQ_WIDTH]))) begin
-            swapin_pair_valid_c[gi] = 1'b1;
-            swapin_pair_port_c[gi*PORT_W +: PORT_W] = PORT_W'(pi1);
-            swapin_pair_desc_c[gi*DESC_W +: DESC_W] =
-              hbm_min_desc_raw[pi1*DESC_W +: DESC_W];
-            swapin_pair_rank_c[gi*RANK_WIDTH +: RANK_WIDTH] =
-              hbm_min_rank_raw[pi1*RANK_WIDTH +: RANK_WIDTH];
-            swapin_pair_seq_c[gi*SEQ_WIDTH +: SEQ_WIDTH] =
-              hbm_min_seq_raw[pi1*SEQ_WIDTH +: SEQ_WIDTH];
-            swapin_pair_cells_raw_c[gi*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH] =
-              hbm_min_cell_count_raw[pi1*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH];
-            swapin_pair_batch_c[gi*BATCH_ID_W +: BATCH_ID_W] =
-              hbm_min_batch_id_raw[pi1*BATCH_ID_W +: BATCH_ID_W];
-            swapin_pair_batch_off_c[gi*BATCH_OFF_W +: BATCH_OFF_W] =
-              hbm_min_batch_off_raw[pi1*BATCH_OFF_W +: BATCH_OFF_W];
-          end
-        end
-      end
-
-      always_ff @(posedge clk) begin
-        if (!resetn) begin
-          swapout_pair_valid_q <= '0;
-          swapout_pair_port_q <= '0;
-          swapout_pair_desc_q <= '0;
-          swapout_pair_rank_q <= '0;
-          swapout_pair_seq_q <= '0;
-          swapout_pair_cells_raw_q <= '0;
-          swapin_pair_valid_q <= '0;
-          swapin_pair_port_q <= '0;
-          swapin_pair_desc_q <= '0;
-          swapin_pair_rank_q <= '0;
-          swapin_pair_seq_q <= '0;
-          swapin_pair_cells_raw_q <= '0;
-          swapin_pair_batch_q <= '0;
-          swapin_pair_batch_off_q <= '0;
-        end else begin
-          swapout_pair_valid_q <= swapout_pair_valid_c;
-          swapout_pair_port_q <= swapout_pair_port_c;
-          swapout_pair_desc_q <= swapout_pair_desc_c;
-          swapout_pair_rank_q <= swapout_pair_rank_c;
-          swapout_pair_seq_q <= swapout_pair_seq_c;
-          swapout_pair_cells_raw_q <= swapout_pair_cells_raw_c;
-          swapin_pair_valid_q <= swapin_pair_valid_c;
-          swapin_pair_port_q <= swapin_pair_port_c;
-          swapin_pair_desc_q <= swapin_pair_desc_c;
-          swapin_pair_rank_q <= swapin_pair_rank_c;
-          swapin_pair_seq_q <= swapin_pair_seq_c;
-          swapin_pair_cells_raw_q <= swapin_pair_cells_raw_c;
-          swapin_pair_batch_q <= swapin_pair_batch_c;
-          swapin_pair_batch_off_q <= swapin_pair_batch_off_c;
-        end
-      end
-    end else begin : gen_candidate_pair_reduce_passthrough
-      assign swapout_pair_valid_q = '0;
-      assign swapout_pair_port_q = '0;
-      assign swapout_pair_desc_q = '0;
-      assign swapout_pair_rank_q = '0;
-      assign swapout_pair_seq_q = '0;
-      assign swapout_pair_cells_raw_q = '0;
-      assign swapin_pair_valid_q = '0;
-      assign swapin_pair_port_q = '0;
-      assign swapin_pair_desc_q = '0;
-      assign swapin_pair_rank_q = '0;
-      assign swapin_pair_seq_q = '0;
-      assign swapin_pair_cells_raw_q = '0;
-      assign swapin_pair_batch_q = '0;
-      assign swapin_pair_batch_off_q = '0;
-    end
-  endgenerate
-
-  generate
-    if (POLICY_MODE == POLICY_DT) begin : gen_dt_policy
+    if (POLICY_MODE == POLICY_DT) begin : gen_ext_dt_policy
       hestia_policy_dt #(
         .PORTS(PORTS),
         .CELL_COUNT_WIDTH(CELL_COUNT_WIDTH),
         .OCC_WIDTH(COUNT_W),
-        .ALPHA_SHIFT_WIDTH(POLICY_ALPHA_SHIFT_WIDTH)
+        .ALPHA_SHIFT_WIDTH(POLICY_ALPHA_SHIFT_WIDTH),
+        .STATIC_ALPHA_SHIFT(POLICY_ALPHA_SHIFT),
+        .FAST_SMALL_CELL_COMPARE(1'b1)
       ) dt_policy (
         .cfg_alpha_shift(POLICY_ALPHA_SHIFT_VALUE),
         .pkt_valid(s_pkt_valid),
         .pkt_port(s_pkt_port),
         .pkt_cell_count(s_pkt_cell_count),
-        .free_cells(sram_free_count_q),
+        .free_cells(sram_free_count_ext_c),
         .port_occ_flat(policy_sram_occ_flat_c),
         .pkt_admit(policy_admit_c),
         .threshold(policy_threshold_c)
       );
-    end else if ((POLICY_MODE == POLICY_OCCAMY_HEAD) ||
-                 (POLICY_MODE == POLICY_OCCAMY_MAX)) begin : gen_occamy_admit_policy
+    end else begin : gen_ext_no_dt_policy
+      assign policy_admit_c = 1'b0;
+      assign policy_threshold_c = '0;
+    end
+
+    if ((POLICY_MODE == POLICY_OCCAMY_HEAD) ||
+        (POLICY_MODE == POLICY_OCCAMY_MAX)) begin : gen_ext_occamy_policy
       hestia_policy_occamy #(
         .PORTS(PORTS),
         .CELL_COUNT_WIDTH(CELL_COUNT_WIDTH),
         .OCC_WIDTH(COUNT_W),
-        .ALPHA_SHIFT_WIDTH(POLICY_ALPHA_SHIFT_WIDTH)
+        .ALPHA_SHIFT_WIDTH(POLICY_ALPHA_SHIFT_WIDTH),
+        .STATIC_ALPHA_SHIFT(POLICY_ALPHA_SHIFT)
       ) occamy_policy (
         .clk(clk),
         .resetn(resetn),
         .cfg_alpha_shift(POLICY_ALPHA_SHIFT_VALUE),
         .reclaim_enable(enable),
-        .reclaim_fire(swapout_fire_exec_c),
+        .reclaim_fire(occamy_reclaim_fire_c),
         .pkt_valid(s_pkt_valid),
         .pkt_port(s_pkt_port),
         .pkt_cell_count(s_pkt_cell_count),
-        .free_cells(sram_free_count_q),
+        .free_cells(sram_free_count_ext_c),
         .port_occ_flat(policy_sram_occ_flat_c),
-        .pkt_admit(policy_admit_c),
-        .threshold(policy_threshold_c),
+        .pkt_admit(),
+        .threshold(),
         .over_threshold_bitmap(occamy_over_threshold_c),
         .reclaim_valid(occamy_reclaim_valid_c),
         .reclaim_port(occamy_reclaim_port_c)
       );
-    end else begin : gen_no_admit_policy
-      assign policy_admit_c = 1'b1;
-      assign policy_threshold_c = '0;
-    end
-
-    if ((POLICY_MODE != POLICY_OCCAMY_HEAD) &&
-        (POLICY_MODE != POLICY_OCCAMY_MAX)) begin : gen_no_occamy_reclaim
+    end else begin : gen_ext_no_occamy_policy
       assign occamy_over_threshold_c = '0;
       assign occamy_reclaim_valid_c = 1'b0;
       assign occamy_reclaim_port_c = '0;
     end
 
-    if (POLICY_MODE == POLICY_OBM) begin : gen_obm_policy
-      hestia_policy_obm #(
-        .PORTS(PORTS),
-        .OCC_WIDTH(COUNT_W)
-      ) obm_policy (
-        .port_occ_flat(policy_sram_occ_flat_c),
-        .pkt_port(s_pkt_port),
-        .pkt_valid(s_pkt_valid),
-        .longest_valid(obm_longest_valid_c),
-        .longest_port(obm_longest_port_c),
-        .longest_occupancy(obm_longest_occ_c),
-        .pkt_targets_longest(obm_pkt_targets_longest_c)
-      );
-    end else begin : gen_no_obm_policy
-      assign obm_longest_valid_c = 1'b0;
-      assign obm_longest_port_c = '0;
-      assign obm_longest_occ_c = '0;
-      assign obm_pkt_targets_longest_c = 1'b0;
-    end
-
-    if (POLICY_MODE == POLICY_HYBRID_THEMIS) begin : gen_hybrid_themis_policy
+    if (POLICY_MODE == POLICY_HYBRID_THEMIS) begin : gen_ext_hybrid_policy
       hestia_policy_hybrid_themis #(
         .PORTS(PORTS),
         .CELL_COUNT_WIDTH(CELL_COUNT_WIDTH),
         .OCC_WIDTH(COUNT_W),
-        .ALPHA_SHIFT_WIDTH(POLICY_ALPHA_SHIFT_WIDTH)
+        .ALPHA_SHIFT_WIDTH(POLICY_ALPHA_SHIFT_WIDTH),
+        .STATIC_ALPHA_SHIFT(POLICY_ALPHA_SHIFT)
       ) hybrid_themis_policy (
         .clk(clk),
         .resetn(resetn),
@@ -1471,9 +1350,9 @@ module hestia_core_ddr_bbq_extmeta #(
         .pkt_valid(s_pkt_valid),
         .pkt_port(s_pkt_port),
         .pkt_cell_count(s_pkt_cell_count),
-        .free_cells(sram_free_count_q),
+        .free_cells(sram_free_count_ext_c),
         .sram_occ_flat(policy_sram_occ_flat_c),
-        .ddr_occ_flat(hbm_occ_flat),
+        .ddr_occ_flat(policy_hbm_occ_flat_c),
         .pkt_admit(hybrid_policy_admit_c),
         .threshold(hybrid_policy_threshold_c),
         .over_threshold_bitmap(hybrid_over_threshold_c),
@@ -1484,8 +1363,8 @@ module hestia_core_ddr_bbq_extmeta #(
         .swapin_hint_port(hybrid_swapin_hint_port_c),
         .digest(hybrid_policy_digest_c)
       );
-    end else begin : gen_no_hybrid_themis_policy
-      assign hybrid_policy_admit_c = 1'b1;
+    end else begin : gen_ext_no_hybrid_policy
+      assign hybrid_policy_admit_c = 1'b0;
       assign hybrid_policy_threshold_c = '0;
       assign hybrid_over_threshold_c = '0;
       assign hybrid_under_threshold_c = '0;
@@ -1497,13 +1376,9 @@ module hestia_core_ddr_bbq_extmeta #(
     end
   endgenerate
 
-  assign selected_policy_digest_c =
-      (ENABLE_OBSERVABILITY && (POLICY_MODE == POLICY_HYBRID_THEMIS)) ?
-      hybrid_policy_digest_c : 64'd0;
-  assign observability_digest_c =
-      ENABLE_OBSERVABILITY ? (meta_digest ^ selected_policy_digest_c) : 64'd0;
+  assign selected_policy_digest_c = hybrid_policy_digest_c;
 
-  hestia_extmeta_tables #(
+  (* dont_touch = "true" *) hestia_extmeta_tables #(
     .PORT_W(PORT_W),
     .RANK_WIDTH(RANK_WIDTH),
     .SEQ_WIDTH(SEQ_WIDTH),
@@ -1519,7 +1394,8 @@ module hestia_core_ddr_bbq_extmeta #(
     .BATCH_SIZE(BATCH_SIZE),
     .ACTIVE_BATCH_SLOTS(4096),
     .PAYLOAD_CELL_WIDTH(AXI_DATA_WIDTH),
-    .USE_ASIC_MEMORY_MACROS(USE_ASIC_MEMORY_MACROS)
+    .USE_ASIC_MEMORY_MACROS(USE_ASIC_MEMORY_MACROS),
+    .ENABLE_DIGEST(ENABLE_DDR_META_CHECK)
   ) meta_tables (
     .clk(clk),
     .resetn(resetn),
@@ -1571,9 +1447,51 @@ module hestia_core_ddr_bbq_extmeta #(
   );
 
   always_comb begin
+    for (int si = 0; si < SWAP_STAGE_PORTS; si = si + 1) begin
+      obm_stage_valid_c[si] = 1'b0;
+      obm_stage_port_c[si] = '0;
+      obm_stage_occ_c[si] = '0;
+      for (int oi = 0; oi < 2; oi = oi + 1) begin
+        int pi;
+        logic [COUNT_W-1:0] occ_v;
+        pi = si*2 + oi;
+        occ_v = '0;
+        if (pi < PORTS) begin
+          occ_v = policy_sram_occ_flat_q[pi*COUNT_W +: COUNT_W];
+        end
+        if ((POLICY_MODE == POLICY_OBM) &&
+            (pi < PORTS) &&
+            (occ_v != '0) &&
+            (!obm_stage_valid_c[si] || (occ_v > obm_stage_occ_c[si]))) begin
+          obm_stage_valid_c[si] = 1'b1;
+          obm_stage_port_c[si] = PORT_W'(pi);
+          obm_stage_occ_c[si] = occ_v;
+        end
+      end
+    end
+
+    obm_longest_valid_c = 1'b0;
+    obm_longest_port_c = '0;
+    obm_longest_occ_c = '0;
+    for (int si = 0; si < SWAP_STAGE_PORTS; si = si + 1) begin
+      if ((POLICY_MODE == POLICY_OBM) &&
+          obm_stage_valid_q[si] &&
+          (!obm_longest_valid_c || (obm_stage_occ_q[si] > obm_longest_occ_c))) begin
+        obm_longest_valid_c = 1'b1;
+        obm_longest_port_c = obm_stage_port_q[si];
+        obm_longest_occ_c = obm_stage_occ_q[si];
+      end
+    end
+    obm_pkt_targets_longest_c = s_pkt_valid && obm_longest_valid_c &&
+                                (s_pkt_port == obm_longest_port_c);
+  end
+
+  always_comb begin
     pkt_cells_c = cell_count_count(s_pkt_cell_count);
+    pkt_cells_sram_c = cell_count_sram_free(s_pkt_cell_count);
+    sram_free_count_ext_c = {{(COUNT_W-SRAM_FREE_W){1'b0}}, sram_free_count_q};
     pkt_cells_ok_c = (pkt_cells_c != '0) && (pkt_cells_c <= BATCH_SIZE_COUNT);
-    sram_can_fit_c = pkt_cells_ok_c && (sram_free_count_q >= pkt_cells_c);
+    sram_can_fit_c = pkt_cells_ok_c && (sram_free_count_q >= pkt_cells_sram_c);
     ddr_can_fit_c = pkt_cells_ok_c &&
                     (ddr_free_cell_count_q >= pkt_cells_c) &&
                     (batch_free_count_q != '0 || open_batch_valid_q);
@@ -1593,7 +1511,7 @@ module hestia_core_ddr_bbq_extmeta #(
         ingress_to_sram_c = sram_can_fit_c && policy_admit_c;
       end
       POLICY_OBM: begin
-        ingress_to_sram_c = sram_can_fit_c && (!obm_pkt_targets_longest_c || !ddr_can_fit_c);
+        ingress_to_sram_c = sram_can_fit_c && (!obm_pkt_targets_longest_q || !ddr_can_fit_c);
       end
       POLICY_HYBRID_THEMIS: begin
         ingress_to_sram_c = sram_can_fit_c && hybrid_policy_admit_c;
@@ -1603,41 +1521,69 @@ module hestia_core_ddr_bbq_extmeta #(
       end
     endcase
     ingress_to_hbm_c = !ingress_to_sram_c && ddr_can_fit_c;
+    ingress_resource_ready_c = enable && meta_ready && deq_issue_open_q && !ingress_valid_q &&
+                               (desc_free_count_q != '0) && pkt_cells_ok_c &&
+                               (sram_can_fit_c || ddr_can_fit_c);
+    s_pkt_ready = ingress_ready_q;
+    ingress_fire_c = s_pkt_valid && s_pkt_ready;
+
     for (int pi = 0; pi < PORTS; pi = pi + 1) begin
-      deq_req_c[pi] = !scheduler_pipe_busy_c &&
-                      dequeue_enable[pi] && !out_valid_q[pi] &&
+      deq_req_c[pi] = dequeue_enable[pi] && !out_busy_q[pi] &&
                       (sram_min_valid[pi] || hbm_min_valid[pi]);
     end
     deq_port_c = rr_select(deq_req_c, deq_rr_q);
-    deq_fire_c = |deq_req_c;
+    deq_fire_c = deq_issue_open_q && (|deq_req_c);
     deq_from_sram_c =
-      sram_min_valid[deq_port_c] &&
-      (!hbm_min_valid[deq_port_c] ||
-       rank_less(sram_min_rank[deq_port_c*RANK_WIDTH +: RANK_WIDTH],
-                 sram_min_seq[deq_port_c*SEQ_WIDTH +: SEQ_WIDTH],
-                 hbm_min_rank[deq_port_c*RANK_WIDTH +: RANK_WIDTH],
-                 hbm_min_seq[deq_port_c*SEQ_WIDTH +: SEQ_WIDTH]));
+      sram_min_valid[deq_select_port_q] &&
+      (!hbm_min_valid[deq_select_port_q] ||
+       rank_less(sram_min_rank[deq_select_port_q*RANK_WIDTH +: RANK_WIDTH],
+                 sram_min_seq[deq_select_port_q*SEQ_WIDTH +: SEQ_WIDTH],
+                 hbm_min_rank[deq_select_port_q*RANK_WIDTH +: RANK_WIDTH],
+                 hbm_min_seq[deq_select_port_q*SEQ_WIDTH +: SEQ_WIDTH]));
     deq_desc_c = deq_from_sram_c ?
-                 sram_min_desc[deq_port_c*DESC_W +: DESC_W] :
-                 hbm_min_desc[deq_port_c*DESC_W +: DESC_W];
+                 sram_min_desc[deq_select_port_q*DESC_W +: DESC_W] :
+                 hbm_min_desc[deq_select_port_q*DESC_W +: DESC_W];
     deq_rank_c = deq_from_sram_c ?
-                 sram_min_rank[deq_port_c*RANK_WIDTH +: RANK_WIDTH] :
-                 hbm_min_rank[deq_port_c*RANK_WIDTH +: RANK_WIDTH];
+                 sram_min_rank[deq_select_port_q*RANK_WIDTH +: RANK_WIDTH] :
+                 hbm_min_rank[deq_select_port_q*RANK_WIDTH +: RANK_WIDTH];
     deq_seq_c = deq_from_sram_c ?
-                sram_min_seq[deq_port_c*SEQ_WIDTH +: SEQ_WIDTH] :
-                hbm_min_seq[deq_port_c*SEQ_WIDTH +: SEQ_WIDTH];
+                sram_min_seq[deq_select_port_q*SEQ_WIDTH +: SEQ_WIDTH] :
+                hbm_min_seq[deq_select_port_q*SEQ_WIDTH +: SEQ_WIDTH];
     deq_cells_raw_c = deq_from_sram_c ?
-                      sram_min_cell_count[deq_port_c*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH] :
-                      hbm_min_cell_count[deq_port_c*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH];
+                      sram_min_cell_count[deq_select_port_q*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH] :
+                      hbm_min_cell_count[deq_select_port_q*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH];
     deq_cells_c = cell_count_count(deq_cells_raw_c);
-    deq_batch_c = hbm_min_batch_id[deq_port_c*BATCH_ID_W +: BATCH_ID_W];
-    deq_batch_off_c = hbm_min_batch_off[deq_port_c*BATCH_OFF_W +: BATCH_OFF_W];
+    deq_cells_sram_c = cell_count_sram_free(deq_cells_raw_c);
+    deq_batch_c = hbm_min_batch_id[deq_select_port_q*BATCH_ID_W +: BATCH_ID_W];
+    deq_batch_off_c = hbm_min_batch_off[deq_select_port_q*BATCH_OFF_W +: BATCH_OFF_W];
 
-    s_pkt_ready = enable && meta_ready && !scheduler_pipe_busy_c &&
-                  !(PIPELINE_SCHEDULER_CANDIDATES && deq_fire_c) &&
-                  (desc_free_count_q != '0) &&
-                  pkt_cells_ok_c && (ingress_to_sram_c || ingress_to_hbm_c);
-    ingress_fire_c = s_pkt_valid && s_pkt_ready;
+    for (int si = 0; si < SWAP_STAGE_PORTS; si = si + 1) begin
+      swapout_stage_valid_c[si] = 1'b0;
+      swapout_stage_port_c[si] = '0;
+      swapout_stage_desc_c[si] = '0;
+      swapout_stage_rank_c[si] = '0;
+      swapout_stage_seq_c[si] = '0;
+      swapout_stage_cells_raw_c[si] = '0;
+      for (int oi = 0; oi < 2; oi = oi + 1) begin
+        int pi;
+        pi = si*2 + oi;
+        if ((pi < PORTS) &&
+            sram_max_valid[pi] &&
+            ((POLICY_MODE != POLICY_HYBRID_THEMIS) || hybrid_over_threshold_c[pi]) &&
+            (!swapout_stage_valid_c[si] ||
+             rank_greater(sram_max_rank[pi*RANK_WIDTH +: RANK_WIDTH],
+                          sram_max_seq[pi*SEQ_WIDTH +: SEQ_WIDTH],
+                          swapout_stage_rank_c[si],
+                          swapout_stage_seq_c[si]))) begin
+          swapout_stage_valid_c[si] = 1'b1;
+          swapout_stage_port_c[si] = PORT_W'(pi);
+          swapout_stage_desc_c[si] = sram_max_desc[pi*DESC_W +: DESC_W];
+          swapout_stage_rank_c[si] = sram_max_rank[pi*RANK_WIDTH +: RANK_WIDTH];
+          swapout_stage_seq_c[si] = sram_max_seq[pi*SEQ_WIDTH +: SEQ_WIDTH];
+          swapout_stage_cells_raw_c[si] = sram_max_cell_count[pi*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH];
+        end
+      end
+    end
 
     swapout_valid_c = 1'b0;
     swapout_port_c = '0;
@@ -1645,42 +1591,55 @@ module hestia_core_ddr_bbq_extmeta #(
     swapout_rank_c = '0;
     swapout_seq_c = '0;
     swapout_cells_raw_c = '0;
-    if (PIPELINE_SCHEDULER_CANDIDATES) begin
-      for (int gi = 0; gi < SCHED_PAIR_COUNT; gi = gi + 1) begin
-        if (swapout_pair_valid_q[gi] &&
-            (!swapout_valid_c ||
-             rank_greater(swapout_pair_rank_q[gi*RANK_WIDTH +: RANK_WIDTH],
-                          swapout_pair_seq_q[gi*SEQ_WIDTH +: SEQ_WIDTH],
-                          swapout_rank_c,
-                          swapout_seq_c))) begin
-          swapout_valid_c = 1'b1;
-          swapout_port_c = swapout_pair_port_q[gi*PORT_W +: PORT_W];
-          swapout_desc_c = swapout_pair_desc_q[gi*DESC_W +: DESC_W];
-          swapout_rank_c = swapout_pair_rank_q[gi*RANK_WIDTH +: RANK_WIDTH];
-          swapout_seq_c = swapout_pair_seq_q[gi*SEQ_WIDTH +: SEQ_WIDTH];
-          swapout_cells_raw_c =
-            swapout_pair_cells_raw_q[gi*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH];
-        end
-      end
-    end else begin
-      for (int pi = 0; pi < PORTS; pi = pi + 1) begin
-        if (sram_max_valid[pi] &&
-            ((POLICY_MODE != POLICY_HYBRID_THEMIS) || hybrid_over_threshold_c[pi]) &&
-            (!swapout_valid_c ||
-             rank_greater(sram_max_rank[pi*RANK_WIDTH +: RANK_WIDTH],
-                          sram_max_seq[pi*SEQ_WIDTH +: SEQ_WIDTH],
-                          swapout_rank_c,
-                          swapout_seq_c))) begin
-          swapout_valid_c = 1'b1;
-          swapout_port_c = PORT_W'(pi);
-          swapout_desc_c = sram_max_desc[pi*DESC_W +: DESC_W];
-          swapout_rank_c = sram_max_rank[pi*RANK_WIDTH +: RANK_WIDTH];
-          swapout_seq_c = sram_max_seq[pi*SEQ_WIDTH +: SEQ_WIDTH];
-          swapout_cells_raw_c = sram_max_cell_count[pi*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH];
-        end
+    for (int si = 0; si < SWAP_STAGE_PORTS; si = si + 1) begin
+      if (swapout_stage_valid_q[si] &&
+          (!swapout_valid_c ||
+           rank_greater(swapout_stage_rank_q[si],
+                        swapout_stage_seq_q[si],
+                        swapout_rank_c,
+                        swapout_seq_c))) begin
+        swapout_valid_c = 1'b1;
+        swapout_port_c = swapout_stage_port_q[si];
+        swapout_desc_c = swapout_stage_desc_q[si];
+        swapout_rank_c = swapout_stage_rank_q[si];
+        swapout_seq_c = swapout_stage_seq_q[si];
+        swapout_cells_raw_c = swapout_stage_cells_raw_q[si];
       end
     end
     swapout_cells_c = cell_count_count(swapout_cells_raw_c);
+    swapout_cells_sram_c = cell_count_sram_free(swapout_cells_raw_c);
+
+    for (int si = 0; si < SWAP_STAGE_PORTS; si = si + 1) begin
+      swapin_stage_valid_c[si] = 1'b0;
+      swapin_stage_port_c[si] = '0;
+      swapin_stage_desc_c[si] = '0;
+      swapin_stage_rank_c[si] = '1;
+      swapin_stage_seq_c[si] = '1;
+      swapin_stage_cells_raw_c[si] = '0;
+      swapin_stage_batch_c[si] = '0;
+      swapin_stage_batch_off_c[si] = '0;
+      for (int oi = 0; oi < 2; oi = oi + 1) begin
+        int pi;
+        pi = si*2 + oi;
+        if ((pi < PORTS) &&
+            hbm_min_valid[pi] &&
+            ((POLICY_MODE != POLICY_HYBRID_THEMIS) || hybrid_under_threshold_c[pi]) &&
+            (!swapin_stage_valid_c[si] ||
+             rank_less(hbm_min_rank[pi*RANK_WIDTH +: RANK_WIDTH],
+                       hbm_min_seq[pi*SEQ_WIDTH +: SEQ_WIDTH],
+                       swapin_stage_rank_c[si],
+                       swapin_stage_seq_c[si]))) begin
+          swapin_stage_valid_c[si] = 1'b1;
+          swapin_stage_port_c[si] = PORT_W'(pi);
+          swapin_stage_desc_c[si] = hbm_min_desc[pi*DESC_W +: DESC_W];
+          swapin_stage_rank_c[si] = hbm_min_rank[pi*RANK_WIDTH +: RANK_WIDTH];
+          swapin_stage_seq_c[si] = hbm_min_seq[pi*SEQ_WIDTH +: SEQ_WIDTH];
+          swapin_stage_cells_raw_c[si] = hbm_min_cell_count[pi*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH];
+          swapin_stage_batch_c[si] = hbm_min_batch_id[pi*BATCH_ID_W +: BATCH_ID_W];
+          swapin_stage_batch_off_c[si] = hbm_min_batch_off[pi*BATCH_OFF_W +: BATCH_OFF_W];
+        end
+      end
+    end
 
     swapin_valid_c = 1'b0;
     swapin_port_c = '0;
@@ -1690,240 +1649,26 @@ module hestia_core_ddr_bbq_extmeta #(
     swapin_cells_raw_c = '0;
     swapin_batch_c = '0;
     swapin_batch_off_c = '0;
-    if (PIPELINE_SCHEDULER_CANDIDATES) begin
-      for (int gi = 0; gi < SCHED_PAIR_COUNT; gi = gi + 1) begin
-        if (swapin_pair_valid_q[gi] &&
-            (!swapin_valid_c ||
-             rank_less(swapin_pair_rank_q[gi*RANK_WIDTH +: RANK_WIDTH],
-                       swapin_pair_seq_q[gi*SEQ_WIDTH +: SEQ_WIDTH],
-                       swapin_rank_c,
-                       swapin_seq_c))) begin
-          swapin_valid_c = 1'b1;
-          swapin_port_c = swapin_pair_port_q[gi*PORT_W +: PORT_W];
-          swapin_desc_c = swapin_pair_desc_q[gi*DESC_W +: DESC_W];
-          swapin_rank_c = swapin_pair_rank_q[gi*RANK_WIDTH +: RANK_WIDTH];
-          swapin_seq_c = swapin_pair_seq_q[gi*SEQ_WIDTH +: SEQ_WIDTH];
-          swapin_cells_raw_c =
-            swapin_pair_cells_raw_q[gi*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH];
-          swapin_batch_c = swapin_pair_batch_q[gi*BATCH_ID_W +: BATCH_ID_W];
-          swapin_batch_off_c =
-            swapin_pair_batch_off_q[gi*BATCH_OFF_W +: BATCH_OFF_W];
-        end
-      end
-    end else begin
-      for (int pi = 0; pi < PORTS; pi = pi + 1) begin
-        if (hbm_min_valid[pi] &&
-            ((POLICY_MODE != POLICY_HYBRID_THEMIS) || hybrid_under_threshold_c[pi]) &&
-            (!swapin_valid_c ||
-             rank_less(hbm_min_rank[pi*RANK_WIDTH +: RANK_WIDTH],
-                       hbm_min_seq[pi*SEQ_WIDTH +: SEQ_WIDTH],
-                       swapin_rank_c,
-                       swapin_seq_c))) begin
-          swapin_valid_c = 1'b1;
-          swapin_port_c = PORT_W'(pi);
-          swapin_desc_c = hbm_min_desc[pi*DESC_W +: DESC_W];
-          swapin_rank_c = hbm_min_rank[pi*RANK_WIDTH +: RANK_WIDTH];
-          swapin_seq_c = hbm_min_seq[pi*SEQ_WIDTH +: SEQ_WIDTH];
-          swapin_cells_raw_c = hbm_min_cell_count[pi*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH];
-          swapin_batch_c = hbm_min_batch_id[pi*BATCH_ID_W +: BATCH_ID_W];
-          swapin_batch_off_c = hbm_min_batch_off[pi*BATCH_OFF_W +: BATCH_OFF_W];
-        end
+    for (int si = 0; si < SWAP_STAGE_PORTS; si = si + 1) begin
+      if (swapin_stage_valid_q[si] &&
+          (!swapin_valid_c ||
+           rank_less(swapin_stage_rank_q[si],
+                     swapin_stage_seq_q[si],
+                     swapin_rank_c,
+                     swapin_seq_c))) begin
+        swapin_valid_c = 1'b1;
+        swapin_port_c = swapin_stage_port_q[si];
+        swapin_desc_c = swapin_stage_desc_q[si];
+        swapin_rank_c = swapin_stage_rank_q[si];
+        swapin_seq_c = swapin_stage_seq_q[si];
+        swapin_cells_raw_c = swapin_stage_cells_raw_q[si];
+        swapin_batch_c = swapin_stage_batch_q[si];
+        swapin_batch_off_c = swapin_stage_batch_off_q[si];
       end
     end
     swapin_cells_c = cell_count_count(swapin_cells_raw_c);
+    swapin_cells_sram_c = cell_count_sram_free(swapin_cells_raw_c);
 
-  end
-
-  generate
-    if (PIPELINE_SCHEDULER_CANDIDATES) begin : gen_scheduler_candidate_pipeline
-      assign scheduler_pipe_busy_c =
-          candidate_refresh_q || ingress_fire_q || deq_fire_q ||
-          swapin_valid_q || swapout_valid_q;
-
-      always_ff @(posedge clk) begin
-        if (!resetn) begin
-          candidate_refresh_q <= 1'b0;
-          ingress_fire_q <= 1'b0;
-          ingress_to_sram_q <= 1'b0;
-          ingress_to_hbm_q <= 1'b0;
-          ingress_port_q <= '0;
-          ingress_rank_q <= '0;
-          ingress_seq_q <= '0;
-          ingress_cells_raw_q <= '0;
-          ingress_cells_q <= '0;
-          ingress_payload_q <= '0;
-          ingress_desc_q <= '0;
-          ingress_batch_q <= '0;
-          ingress_batch_off_q <= '0;
-          deq_fire_q <= 1'b0;
-          deq_port_q_stage <= '0;
-          deq_from_sram_q <= 1'b0;
-          deq_desc_q_stage <= '0;
-          deq_rank_q_stage <= '0;
-          deq_seq_q_stage <= '0;
-          deq_cells_raw_q_stage <= '0;
-          deq_cells_q_stage <= '0;
-          deq_batch_q_stage <= '0;
-          deq_batch_off_q_stage <= '0;
-          swapin_valid_q <= 1'b0;
-          swapin_port_q <= '0;
-          swapin_desc_q <= '0;
-          swapin_rank_q <= '0;
-          swapin_seq_q <= '0;
-          swapin_cells_raw_q <= '0;
-          swapin_cells_q <= '0;
-          swapin_batch_q <= '0;
-          swapin_batch_off_q <= '0;
-          swapout_valid_q <= 1'b0;
-          swapout_port_q <= '0;
-          swapout_desc_q <= '0;
-          swapout_rank_q <= '0;
-          swapout_seq_q <= '0;
-          swapout_cells_raw_q <= '0;
-          swapout_cells_q <= '0;
-        end else begin
-          candidate_refresh_q <= ingress_fire_q || deq_fire_q ||
-                                 swapin_fire_exec_c || swapout_fire_exec_c;
-          if (scheduler_pipe_busy_c) begin
-            ingress_fire_q <= 1'b0;
-            deq_fire_q <= 1'b0;
-            swapin_valid_q <= 1'b0;
-            swapout_valid_q <= 1'b0;
-          end else begin
-            ingress_fire_q <= ingress_fire_c;
-            if (ingress_fire_c) begin
-              ingress_to_sram_q <= ingress_to_sram_c;
-              ingress_to_hbm_q <= ingress_to_hbm_c;
-              ingress_port_q <= s_pkt_port;
-              ingress_rank_q <= s_pkt_rank;
-              ingress_seq_q <= s_pkt_seq;
-              ingress_cells_raw_q <= s_pkt_cell_count;
-              ingress_cells_q <= pkt_cells_c;
-              ingress_payload_q <= s_pkt_payload;
-              ingress_desc_q <= desc_alloc_head_q;
-              ingress_batch_q <= open_batch_valid_q ? open_batch_id_q : batch_alloc_head_q;
-              ingress_batch_off_q <= open_batch_fill_q[BATCH_OFF_W-1:0];
-            end
-            deq_fire_q <= deq_fire_c;
-            if (deq_fire_c) begin
-              deq_port_q_stage <= deq_port_c;
-              deq_from_sram_q <= deq_from_sram_c;
-              deq_desc_q_stage <= deq_desc_c;
-              deq_rank_q_stage <= deq_rank_c;
-              deq_seq_q_stage <= deq_seq_c;
-              deq_cells_raw_q_stage <= deq_cells_raw_c;
-              deq_cells_q_stage <= deq_cells_c;
-              deq_batch_q_stage <= deq_batch_c;
-              deq_batch_off_q_stage <= deq_batch_off_c;
-            end
-            swapin_valid_q <= swapin_valid_c;
-            if (swapin_valid_c) begin
-              swapin_port_q <= swapin_port_c;
-              swapin_desc_q <= swapin_desc_c;
-              swapin_rank_q <= swapin_rank_c;
-              swapin_seq_q <= swapin_seq_c;
-              swapin_cells_raw_q <= swapin_cells_raw_c;
-              swapin_cells_q <= swapin_cells_c;
-              swapin_batch_q <= swapin_batch_c;
-              swapin_batch_off_q <= swapin_batch_off_c;
-            end
-            swapout_valid_q <= swapout_valid_c;
-            if (swapout_valid_c) begin
-              swapout_port_q <= swapout_port_c;
-              swapout_desc_q <= swapout_desc_c;
-              swapout_rank_q <= swapout_rank_c;
-              swapout_seq_q <= swapout_seq_c;
-              swapout_cells_raw_q <= swapout_cells_raw_c;
-              swapout_cells_q <= swapout_cells_c;
-            end
-          end
-        end
-      end
-
-      assign ingress_fire_s = ingress_fire_q;
-      assign ingress_to_sram_s = ingress_to_sram_q;
-      assign ingress_to_hbm_s = ingress_to_hbm_q;
-      assign ingress_port_s = ingress_port_q;
-      assign ingress_rank_s = ingress_rank_q;
-      assign ingress_seq_s = ingress_seq_q;
-      assign ingress_cells_raw_s = ingress_cells_raw_q;
-      assign ingress_cells_s = ingress_cells_q;
-      assign ingress_payload_s = ingress_payload_q;
-      assign ingress_desc_s = ingress_desc_q;
-      assign ingress_batch_s = ingress_batch_q;
-      assign ingress_batch_off_s = ingress_batch_off_q;
-      assign deq_fire_s = deq_fire_q;
-      assign deq_port_s = deq_port_q_stage;
-      assign deq_from_sram_s = deq_from_sram_q;
-      assign deq_desc_s = deq_desc_q_stage;
-      assign deq_rank_s = deq_rank_q_stage;
-      assign deq_seq_s = deq_seq_q_stage;
-      assign deq_cells_raw_s = deq_cells_raw_q_stage;
-      assign deq_cells_s = deq_cells_q_stage;
-      assign deq_batch_s = deq_batch_q_stage;
-      assign deq_batch_off_s = deq_batch_off_q_stage;
-      assign swapin_valid_s = swapin_valid_q;
-      assign swapin_port_s = swapin_port_q;
-      assign swapin_desc_s = swapin_desc_q;
-      assign swapin_rank_s = swapin_rank_q;
-      assign swapin_seq_s = swapin_seq_q;
-      assign swapin_cells_raw_s = swapin_cells_raw_q;
-      assign swapin_cells_s = swapin_cells_q;
-      assign swapin_batch_s = swapin_batch_q;
-      assign swapin_batch_off_s = swapin_batch_off_q;
-      assign swapout_valid_s = swapout_valid_q;
-      assign swapout_port_s = swapout_port_q;
-      assign swapout_desc_s = swapout_desc_q;
-      assign swapout_rank_s = swapout_rank_q;
-      assign swapout_seq_s = swapout_seq_q;
-      assign swapout_cells_raw_s = swapout_cells_raw_q;
-      assign swapout_cells_s = swapout_cells_q;
-    end else begin : gen_scheduler_candidate_passthrough
-      assign scheduler_pipe_busy_c = 1'b0;
-      assign candidate_refresh_q = 1'b0;
-
-      assign ingress_fire_s = ingress_fire_c;
-      assign ingress_to_sram_s = ingress_to_sram_c;
-      assign ingress_to_hbm_s = ingress_to_hbm_c;
-      assign ingress_port_s = s_pkt_port;
-      assign ingress_rank_s = s_pkt_rank;
-      assign ingress_seq_s = s_pkt_seq;
-      assign ingress_cells_raw_s = s_pkt_cell_count;
-      assign ingress_cells_s = pkt_cells_c;
-      assign ingress_payload_s = s_pkt_payload;
-      assign ingress_desc_s = desc_alloc_head_q;
-      assign ingress_batch_s = open_batch_valid_q ? open_batch_id_q : batch_alloc_head_q;
-      assign ingress_batch_off_s = open_batch_fill_q[BATCH_OFF_W-1:0];
-      assign deq_fire_s = deq_fire_c;
-      assign deq_port_s = deq_port_c;
-      assign deq_from_sram_s = deq_from_sram_c;
-      assign deq_desc_s = deq_desc_c;
-      assign deq_rank_s = deq_rank_c;
-      assign deq_seq_s = deq_seq_c;
-      assign deq_cells_raw_s = deq_cells_raw_c;
-      assign deq_cells_s = deq_cells_c;
-      assign deq_batch_s = deq_batch_c;
-      assign deq_batch_off_s = deq_batch_off_c;
-      assign swapin_valid_s = swapin_valid_c;
-      assign swapin_port_s = swapin_port_c;
-      assign swapin_desc_s = swapin_desc_c;
-      assign swapin_rank_s = swapin_rank_c;
-      assign swapin_seq_s = swapin_seq_c;
-      assign swapin_cells_raw_s = swapin_cells_raw_c;
-      assign swapin_cells_s = swapin_cells_c;
-      assign swapin_batch_s = swapin_batch_c;
-      assign swapin_batch_off_s = swapin_batch_off_c;
-      assign swapout_valid_s = swapout_valid_c;
-      assign swapout_port_s = swapout_port_c;
-      assign swapout_desc_s = swapout_desc_c;
-      assign swapout_rank_s = swapout_rank_c;
-      assign swapout_seq_s = swapout_seq_c;
-      assign swapout_cells_raw_s = swapout_cells_raw_c;
-      assign swapout_cells_s = swapout_cells_c;
-    end
-  endgenerate
-
-  always_comb begin
     port_op_valid = '0;
     port_op_type = '0;
     port_op_tier = '0;
@@ -1933,8 +1678,9 @@ module hestia_core_ddr_bbq_extmeta #(
     port_op_desc = '0;
     port_op_batch_id = '0;
     port_op_batch_off = '0;
+
     wr_start_c = 1'b0;
-    wr_start_batch_c = '0;
+    wr_start_batch_c = open_batch_valid_q ? open_batch_id_q : batch_alloc_head_q;
     wr_start_desc_c = '0;
     wr_start_rank_c = '0;
     wr_start_seq_c = '0;
@@ -1943,91 +1689,90 @@ module hestia_core_ddr_bbq_extmeta #(
     wr_start_payload_c = '0;
     rd_start_c = 1'b0;
     rd_start_batch_c = '0;
-    swapin_fire_exec_c = 1'b0;
-    swapout_fire_exec_c = 1'b0;
+    occamy_reclaim_fire_c = 1'b0;
 
-    if (deq_fire_s) begin
-      port_op_valid[deq_port_s] = 1'b1;
-      port_op_type[deq_port_s*3 +: 3] = deq_from_sram_s ? 3'd2 : 3'd3;
-      port_op_tier[deq_port_s] = !deq_from_sram_s;
-      port_op_rank[deq_port_s*RANK_WIDTH +: RANK_WIDTH] = deq_rank_s;
-      port_op_seq[deq_port_s*SEQ_WIDTH +: SEQ_WIDTH] = deq_seq_s;
-      port_op_cell_count[deq_port_s*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH] = deq_cells_raw_s;
-      port_op_desc[deq_port_s*DESC_W +: DESC_W] = deq_desc_s;
-      port_op_batch_id[deq_port_s*BATCH_ID_W +: BATCH_ID_W] = deq_batch_s;
-      port_op_batch_off[deq_port_s*BATCH_OFF_W +: BATCH_OFF_W] = deq_batch_off_s;
-      rd_start_c = !deq_from_sram_s && (rd_state_q == RD_IDLE);
-      rd_start_batch_c = deq_batch_s;
-    end else if (ingress_fire_s) begin
-      port_op_valid[ingress_port_s] = 1'b1;
-      port_op_type[ingress_port_s*3 +: 3] = 3'd1;
-      port_op_tier[ingress_port_s] = ingress_to_hbm_s;
-      port_op_rank[ingress_port_s*RANK_WIDTH +: RANK_WIDTH] = ingress_rank_s;
-      port_op_seq[ingress_port_s*SEQ_WIDTH +: SEQ_WIDTH] = ingress_seq_s;
-      port_op_cell_count[ingress_port_s*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH] = ingress_cells_raw_s;
-      port_op_desc[ingress_port_s*DESC_W +: DESC_W] = ingress_desc_s;
-      port_op_batch_id[ingress_port_s*BATCH_ID_W +: BATCH_ID_W] = ingress_batch_s;
-      port_op_batch_off[ingress_port_s*BATCH_OFF_W +: BATCH_OFF_W] = ingress_batch_off_s;
-      wr_start_c = ingress_to_hbm_s && (wr_state_q == WR_IDLE);
-      wr_start_batch_c = ingress_batch_s;
-      wr_start_desc_c = ingress_desc_s;
-      wr_start_rank_c = ingress_rank_s;
-      wr_start_seq_c = ingress_seq_s;
-      wr_start_cells_raw_c = ingress_cells_raw_s;
-      wr_start_batch_off_c = ingress_batch_off_s;
-      wr_start_payload_c = ingress_payload_s;
-    end else if (swapin_valid_s &&
-                 (sram_free_count_q >= swapin_cells_s) &&
+    if (deq_valid_q) begin
+      port_op_valid[deq_port_q] = 1'b1;
+      port_op_type[deq_port_q*3 +: 3] = deq_from_sram_q ? 3'd2 : 3'd3;
+      port_op_tier[deq_port_q] = !deq_from_sram_q;
+      port_op_rank[deq_port_q*RANK_WIDTH +: RANK_WIDTH] = deq_rank_q;
+      port_op_seq[deq_port_q*SEQ_WIDTH +: SEQ_WIDTH] = deq_seq_q;
+      port_op_cell_count[deq_port_q*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH] = deq_cells_raw_q;
+      port_op_desc[deq_port_q*DESC_W +: DESC_W] = deq_desc_q;
+      port_op_batch_id[deq_port_q*BATCH_ID_W +: BATCH_ID_W] = deq_batch_q;
+      port_op_batch_off[deq_port_q*BATCH_OFF_W +: BATCH_OFF_W] = deq_batch_off_q;
+      rd_start_c = !deq_from_sram_q && (rd_state_q == RD_IDLE);
+      rd_start_batch_c = deq_batch_q;
+    end else if (ingress_valid_q) begin
+      port_op_valid[ingress_port_q] = 1'b1;
+      port_op_type[ingress_port_q*3 +: 3] = 3'd1;
+      port_op_tier[ingress_port_q] = ingress_to_hbm_q;
+      port_op_rank[ingress_port_q*RANK_WIDTH +: RANK_WIDTH] = ingress_rank_q;
+      port_op_seq[ingress_port_q*SEQ_WIDTH +: SEQ_WIDTH] = ingress_seq_q;
+      port_op_cell_count[ingress_port_q*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH] = ingress_cells_raw_q;
+      port_op_desc[ingress_port_q*DESC_W +: DESC_W] = ingress_desc_q;
+      port_op_batch_id[ingress_port_q*BATCH_ID_W +: BATCH_ID_W] = ingress_batch_q;
+      port_op_batch_off[ingress_port_q*BATCH_OFF_W +: BATCH_OFF_W] = ingress_batch_off_q;
+      wr_start_c = ingress_to_hbm_q && (wr_state_q == WR_IDLE);
+      wr_start_batch_c = ingress_batch_q;
+      wr_start_desc_c = ingress_desc_q;
+      wr_start_rank_c = ingress_rank_q;
+      wr_start_seq_c = ingress_seq_q;
+      wr_start_cells_raw_c = ingress_cells_raw_q;
+      wr_start_batch_off_c = ingress_batch_off_q;
+      wr_start_payload_c = ingress_payload_q;
+    end else if (swapin_valid_q &&
+                 (sram_free_count_q >= swapin_cells_sram_q) &&
                  (rd_state_q == RD_IDLE) &&
                  (((POLICY_MODE == POLICY_THEMIS) &&
                    (global_sram_occ_q < {{(COUNT_W-16){1'b0}}, cfg_swap_in_threshold})) ||
                   ((POLICY_MODE == POLICY_HYBRID_THEMIS) &&
                    hybrid_swapin_hint_valid_c &&
-                   (swapin_port_s == hybrid_swapin_hint_port_c) &&
-                   count_after_add_leq(sram_count_q[swapin_port_s], swapin_cells_s,
+                   (swapin_port_q == hybrid_swapin_hint_port_c) &&
+                   count_after_add_leq(sram_count_q[swapin_port_q], cell_count_count(swapin_cells_q),
                                        hybrid_policy_threshold_c)))) begin
-      swapin_fire_exec_c = 1'b1;
-      port_op_valid[swapin_port_s] = 1'b1;
-      port_op_type[swapin_port_s*3 +: 3] = 3'd4;
-      port_op_tier[swapin_port_s] = 1'b0;
-      port_op_rank[swapin_port_s*RANK_WIDTH +: RANK_WIDTH] = swapin_rank_s;
-      port_op_seq[swapin_port_s*SEQ_WIDTH +: SEQ_WIDTH] = swapin_seq_s;
-      port_op_cell_count[swapin_port_s*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH] = swapin_cells_raw_s;
-      port_op_desc[swapin_port_s*DESC_W +: DESC_W] = swapin_desc_s;
-      port_op_batch_id[swapin_port_s*BATCH_ID_W +: BATCH_ID_W] = swapin_batch_s;
-      port_op_batch_off[swapin_port_s*BATCH_OFF_W +: BATCH_OFF_W] = swapin_batch_off_s;
+      port_op_valid[swapin_port_q] = 1'b1;
+      port_op_type[swapin_port_q*3 +: 3] = 3'd4;
+      port_op_tier[swapin_port_q] = 1'b0;
+      port_op_rank[swapin_port_q*RANK_WIDTH +: RANK_WIDTH] = swapin_rank_q;
+      port_op_seq[swapin_port_q*SEQ_WIDTH +: SEQ_WIDTH] = swapin_seq_q;
+      port_op_cell_count[swapin_port_q*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH] = swapin_cells_raw_q;
+      port_op_desc[swapin_port_q*DESC_W +: DESC_W] = swapin_desc_q;
+      port_op_batch_id[swapin_port_q*BATCH_ID_W +: BATCH_ID_W] = swapin_batch_q;
+      port_op_batch_off[swapin_port_q*BATCH_OFF_W +: BATCH_OFF_W] = swapin_batch_off_q;
       rd_start_c = 1'b1;
-      rd_start_batch_c = swapin_batch_s;
+      rd_start_batch_c = swapin_batch_q;
     end else if ((((POLICY_MODE == POLICY_THEMIS) &&
                    (global_sram_occ_q > {{(COUNT_W-16){1'b0}}, cfg_swap_out_threshold})) ||
                   ((POLICY_MODE == POLICY_OCCAMY_HEAD || POLICY_MODE == POLICY_OCCAMY_MAX) &&
                    occamy_reclaim_valid_c) ||
                   ((POLICY_MODE == POLICY_OBM) &&
-                   obm_longest_valid_c && !obm_pkt_targets_longest_c) ||
+                   obm_longest_valid_q && !obm_pkt_targets_longest_q) ||
                   ((POLICY_MODE == POLICY_HYBRID_THEMIS) &&
                    hybrid_swapout_hint_valid_c &&
-                   (swapout_port_s == hybrid_swapout_hint_port_c))) &&
-                 swapout_valid_s &&
+                   (swapout_port_q == hybrid_swapout_hint_port_c))) &&
+                 swapout_valid_q &&
                  ddr_can_fit_c) begin
-      swapout_fire_exec_c = 1'b1;
-      port_op_valid[swapout_port_s] = 1'b1;
-      port_op_type[swapout_port_s*3 +: 3] = 3'd5;
-      port_op_tier[swapout_port_s] = 1'b1;
-      port_op_rank[swapout_port_s*RANK_WIDTH +: RANK_WIDTH] = swapout_rank_s;
-      port_op_seq[swapout_port_s*SEQ_WIDTH +: SEQ_WIDTH] = swapout_seq_s;
-      port_op_cell_count[swapout_port_s*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH] = swapout_cells_raw_s;
-      port_op_desc[swapout_port_s*DESC_W +: DESC_W] = swapout_desc_s;
-      port_op_batch_id[swapout_port_s*BATCH_ID_W +: BATCH_ID_W] =
+      port_op_valid[swapout_port_q] = 1'b1;
+      port_op_type[swapout_port_q*3 +: 3] = 3'd5;
+      port_op_tier[swapout_port_q] = 1'b1;
+      port_op_rank[swapout_port_q*RANK_WIDTH +: RANK_WIDTH] = swapout_rank_q;
+      port_op_seq[swapout_port_q*SEQ_WIDTH +: SEQ_WIDTH] = swapout_seq_q;
+      port_op_cell_count[swapout_port_q*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH] = swapout_cells_raw_q;
+      port_op_desc[swapout_port_q*DESC_W +: DESC_W] = swapout_desc_q;
+      port_op_batch_id[swapout_port_q*BATCH_ID_W +: BATCH_ID_W] =
         open_batch_valid_q ? open_batch_id_q : batch_alloc_head_q;
-      port_op_batch_off[swapout_port_s*BATCH_OFF_W +: BATCH_OFF_W] = open_batch_fill_q[BATCH_OFF_W-1:0];
+      port_op_batch_off[swapout_port_q*BATCH_OFF_W +: BATCH_OFF_W] = open_batch_fill_q[BATCH_OFF_W-1:0];
       wr_start_c = (wr_state_q == WR_IDLE);
       wr_start_batch_c = open_batch_valid_q ? open_batch_id_q : batch_alloc_head_q;
-      wr_start_desc_c = swapout_desc_s;
-      wr_start_rank_c = swapout_rank_s;
-      wr_start_seq_c = swapout_seq_s;
-      wr_start_cells_raw_c = swapout_cells_raw_s;
+      wr_start_desc_c = swapout_desc_q;
+      wr_start_rank_c = swapout_rank_q;
+      wr_start_seq_c = swapout_seq_q;
+      wr_start_cells_raw_c = swapout_cells_raw_q;
       wr_start_batch_off_c = open_batch_fill_q[BATCH_OFF_W-1:0];
-      wr_start_payload_c = payload_from_desc(swapout_desc_s);
+      wr_start_payload_c = payload_from_desc(swapout_desc_q);
+      occamy_reclaim_fire_c =
+        (POLICY_MODE == POLICY_OCCAMY_HEAD) || (POLICY_MODE == POLICY_OCCAMY_MAX);
     end
   end
 
@@ -2047,7 +1792,7 @@ module hestia_core_ddr_bbq_extmeta #(
     int pi;
     if (!resetn) begin
       desc_free_count_q <= PACKET_SLOTS_COUNT;
-      sram_free_count_q <= SRAM_CELLS_COUNT;
+      sram_free_count_q <= SRAM_CELLS_FREE_COUNT;
       batch_free_count_q <= BATCH_SLOTS_COUNT;
       ddr_free_cell_count_q <= DDR_CELL_CAPACITY_COUNT;
       global_sram_occ_q <= '0;
@@ -2066,6 +1811,68 @@ module hestia_core_ddr_bbq_extmeta #(
       swap_rr_q <= '0;
       wr_rr_q <= '0;
       rd_rr_q <= '0;
+      policy_sram_occ_flat_q <= '0;
+      obm_longest_valid_q <= 1'b0;
+      obm_pkt_targets_longest_q <= 1'b0;
+      ingress_ready_q <= 1'b0;
+      ingress_to_sram_ready_q <= 1'b0;
+      ingress_to_hbm_ready_q <= 1'b0;
+      ingress_valid_q <= 1'b0;
+      ingress_to_sram_q <= 1'b0;
+      ingress_to_hbm_q <= 1'b0;
+      ingress_port_q <= '0;
+      ingress_rank_q <= '0;
+      ingress_seq_q <= '0;
+      ingress_cells_raw_q <= '0;
+      ingress_cells_q <= '0;
+      ingress_cells_sram_q <= '0;
+      ingress_payload_q <= '0;
+      ingress_desc_q <= '0;
+      ingress_batch_q <= '0;
+      ingress_batch_off_q <= '0;
+      deq_select_valid_q <= 1'b0;
+      deq_select_port_q <= '0;
+      deq_valid_q <= 1'b0;
+      deq_issue_open_q <= 1'b1;
+      deq_stage_valid_q <= 1'b0;
+      deq_stage_port_q <= '0;
+      deq_stage_from_sram_q <= 1'b0;
+      deq_stage_desc_q <= '0;
+      deq_stage_rank_q <= '0;
+      deq_stage_seq_q <= '0;
+      deq_stage_cells_raw_q <= '0;
+      deq_stage_cells_q <= '0;
+      deq_stage_cells_sram_q <= '0;
+      deq_stage_batch_q <= '0;
+      deq_stage_batch_off_q <= '0;
+      deq_port_q <= '0;
+      deq_from_sram_q <= 1'b0;
+      deq_desc_q <= '0;
+      deq_rank_q <= '0;
+      deq_seq_q <= '0;
+      deq_cells_raw_q <= '0;
+      deq_cells_q <= '0;
+      deq_cells_sram_q <= '0;
+      deq_batch_q <= '0;
+      deq_batch_off_q <= '0;
+      swapout_valid_q <= 1'b0;
+      swapout_port_q <= '0;
+      swapout_desc_q <= '0;
+      swapout_rank_q <= '0;
+      swapout_seq_q <= '0;
+      swapout_cells_raw_q <= '0;
+      swapout_cells_q <= '0;
+      swapout_cells_sram_q <= '0;
+      swapin_valid_q <= 1'b0;
+      swapin_port_q <= '0;
+      swapin_desc_q <= '0;
+      swapin_rank_q <= '0;
+      swapin_seq_q <= '0;
+      swapin_cells_raw_q <= '0;
+      swapin_cells_q <= '0;
+      swapin_cells_sram_q <= '0;
+      swapin_batch_q <= '0;
+      swapin_batch_off_q <= '0;
       stat_generated <= 32'd0;
       stat_dequeued <= 32'd0;
       stat_sram_admit <= 32'd0;
@@ -2079,7 +1886,9 @@ module hestia_core_ddr_bbq_extmeta #(
       stat_ddr_read_beats <= 32'd0;
       stat_ddr_write_batches <= 32'd0;
       stat_ddr_read_batches <= 32'd0;
+      stat_drop_pending_q <= 1'b0;
       out_valid_q <= '0;
+      out_busy_q <= '0;
       out_rank_q <= '0;
       out_seq_q <= '0;
       out_cell_count_q <= '0;
@@ -2088,15 +1897,34 @@ module hestia_core_ddr_bbq_extmeta #(
         sram_count_q[pi] <= '0;
         hbm_count_q[pi] <= '0;
       end
+      for (pi = 0; pi < SWAP_STAGE_PORTS; pi = pi + 1) begin
+        obm_stage_valid_q[pi] <= 1'b0;
+        obm_stage_port_q[pi] <= '0;
+        obm_stage_occ_q[pi] <= '0;
+        swapout_stage_valid_q[pi] <= 1'b0;
+        swapout_stage_port_q[pi] <= '0;
+        swapout_stage_desc_q[pi] <= '0;
+        swapout_stage_rank_q[pi] <= '0;
+        swapout_stage_seq_q[pi] <= '0;
+        swapout_stage_cells_raw_q[pi] <= '0;
+        swapin_stage_valid_q[pi] <= 1'b0;
+        swapin_stage_port_q[pi] <= '0;
+        swapin_stage_desc_q[pi] <= '0;
+        swapin_stage_rank_q[pi] <= '0;
+        swapin_stage_seq_q[pi] <= '0;
+        swapin_stage_cells_raw_q[pi] <= '0;
+        swapin_stage_batch_q[pi] <= '0;
+        swapin_stage_batch_off_q[pi] <= '0;
+      end
       wr_state_q <= WR_IDLE;
       wr_batch_q <= '0;
-      wr_beat_q <= '0;
       wr_desc_q <= '0;
       wr_rank_q <= '0;
       wr_seq_q <= '0;
       wr_cells_raw_q <= '0;
       wr_batch_off_q <= '0;
       wr_payload_q <= '0;
+      wr_beat_q <= '0;
       rd_state_q <= RD_IDLE;
       rd_direct_q <= 1'b0;
       rd_port_q <= '0;
@@ -2174,140 +2002,276 @@ module hestia_core_ddr_bbq_extmeta #(
       meta_batch_commit_valid_q <= 1'b0;
       meta_batch_query_valid_q <= 1'b0;
       meta_batch_release_valid_q <= 1'b0;
+      policy_sram_occ_flat_q <= policy_sram_occ_flat_c;
+      obm_longest_valid_q <= obm_longest_valid_c;
+      obm_pkt_targets_longest_q <= obm_pkt_targets_longest_c;
+      if (ingress_fire_c) begin
+        ingress_ready_q <= 1'b0;
+        ingress_to_sram_ready_q <= 1'b0;
+        ingress_to_hbm_ready_q <= 1'b0;
+      end else begin
+        ingress_ready_q <= s_pkt_valid && ingress_resource_ready_c &&
+                           (ingress_to_sram_c || ingress_to_hbm_c);
+        ingress_to_sram_ready_q <= ingress_to_sram_c;
+        ingress_to_hbm_ready_q <= ingress_to_hbm_c;
+      end
+      stat_drop_pending_q <= s_pkt_valid && !ingress_ready_q && !ingress_resource_ready_c;
+
+      if (ingress_valid_q && !deq_valid_q) begin
+        ingress_valid_q <= 1'b0;
+      end
+      if (ingress_fire_c) begin
+        ingress_valid_q <= 1'b1;
+        ingress_to_sram_q <= ingress_to_sram_ready_q;
+        ingress_to_hbm_q <= ingress_to_hbm_ready_q;
+        ingress_port_q <= s_pkt_port;
+        ingress_rank_q <= s_pkt_rank;
+        ingress_seq_q <= s_pkt_seq;
+        ingress_cells_raw_q <= s_pkt_cell_count;
+        ingress_cells_q <= s_pkt_cell_count;
+        ingress_cells_sram_q <= pkt_cells_sram_c;
+        ingress_payload_q <= s_pkt_payload;
+        ingress_desc_q <= desc_alloc_head_q;
+        ingress_batch_q <= open_batch_valid_q ? open_batch_id_q : batch_alloc_head_q;
+        ingress_batch_off_q <= open_batch_fill_q[BATCH_OFF_W-1:0];
+      end
+
+      deq_select_valid_q <= deq_fire_c;
+      if (deq_fire_c) begin
+        deq_select_port_q <= deq_port_c;
+        out_busy_q[deq_port_c] <= 1'b1;
+      end
+
+      deq_stage_valid_q <= deq_select_valid_q;
+      if (deq_select_valid_q) begin
+        deq_stage_port_q <= deq_select_port_q;
+        deq_stage_from_sram_q <= deq_from_sram_c;
+        deq_stage_desc_q <= deq_desc_c;
+        deq_stage_rank_q <= deq_rank_c;
+        deq_stage_seq_q <= deq_seq_c;
+        deq_stage_cells_raw_q <= deq_cells_raw_c;
+        deq_stage_cells_q <= deq_cells_raw_c;
+        deq_stage_cells_sram_q <= deq_cells_sram_c;
+        deq_stage_batch_q <= deq_batch_c;
+        deq_stage_batch_off_q <= deq_batch_off_c;
+      end
+
+      deq_valid_q <= deq_stage_valid_q;
+      deq_issue_open_q <= !deq_fire_c;
+      deq_port_q <= deq_stage_port_q;
+      deq_from_sram_q <= deq_stage_from_sram_q;
+      deq_desc_q <= deq_stage_desc_q;
+      deq_rank_q <= deq_stage_rank_q;
+      deq_seq_q <= deq_stage_seq_q;
+      deq_cells_raw_q <= deq_stage_cells_raw_q;
+      deq_cells_q <= deq_stage_cells_q;
+      deq_cells_sram_q <= deq_stage_cells_sram_q;
+      deq_batch_q <= deq_stage_batch_q;
+      deq_batch_off_q <= deq_stage_batch_off_q;
+
+      swapout_valid_q <= swapout_valid_c;
+      for (pi = 0; pi < SWAP_STAGE_PORTS; pi = pi + 1) begin
+        obm_stage_valid_q[pi] <= obm_stage_valid_c[pi];
+        obm_stage_port_q[pi] <= obm_stage_port_c[pi];
+        obm_stage_occ_q[pi] <= obm_stage_occ_c[pi];
+        swapout_stage_valid_q[pi] <= swapout_stage_valid_c[pi];
+        swapout_stage_port_q[pi] <= swapout_stage_port_c[pi];
+        swapout_stage_desc_q[pi] <= swapout_stage_desc_c[pi];
+        swapout_stage_rank_q[pi] <= swapout_stage_rank_c[pi];
+        swapout_stage_seq_q[pi] <= swapout_stage_seq_c[pi];
+        swapout_stage_cells_raw_q[pi] <= swapout_stage_cells_raw_c[pi];
+        swapin_stage_valid_q[pi] <= swapin_stage_valid_c[pi];
+        swapin_stage_port_q[pi] <= swapin_stage_port_c[pi];
+        swapin_stage_desc_q[pi] <= swapin_stage_desc_c[pi];
+        swapin_stage_rank_q[pi] <= swapin_stage_rank_c[pi];
+        swapin_stage_seq_q[pi] <= swapin_stage_seq_c[pi];
+        swapin_stage_cells_raw_q[pi] <= swapin_stage_cells_raw_c[pi];
+        swapin_stage_batch_q[pi] <= swapin_stage_batch_c[pi];
+        swapin_stage_batch_off_q[pi] <= swapin_stage_batch_off_c[pi];
+      end
+      swapout_port_q <= swapout_port_c;
+      swapout_desc_q <= swapout_desc_c;
+      swapout_rank_q <= swapout_rank_c;
+      swapout_seq_q <= swapout_seq_c;
+      swapout_cells_raw_q <= swapout_cells_raw_c;
+      swapout_cells_q <= swapout_cells_raw_c;
+      swapout_cells_sram_q <= swapout_cells_sram_c;
+      swapin_valid_q <= swapin_valid_c;
+      swapin_port_q <= swapin_port_c;
+      swapin_desc_q <= swapin_desc_c;
+      swapin_rank_q <= swapin_rank_c;
+      swapin_seq_q <= swapin_seq_c;
+      swapin_cells_raw_q <= swapin_cells_raw_c;
+      swapin_cells_q <= swapin_cells_raw_c;
+      swapin_cells_sram_q <= swapin_cells_sram_c;
+      swapin_batch_q <= swapin_batch_c;
+      swapin_batch_off_q <= swapin_batch_off_c;
 
       for (pi = 0; pi < PORTS; pi = pi + 1) begin
         if (out_valid_q[pi] && m_pkt_ready[pi]) begin
           out_valid_q[pi] <= 1'b0;
+          out_busy_q[pi] <= 1'b0;
         end
       end
 
-      if (deq_fire_s) begin
-        deq_rr_q <= deq_port_s + 1'b1;
+      if (deq_valid_q) begin
+        deq_rr_q <= deq_port_q + 1'b1;
         desc_free_count_q <= desc_free_count_q + 1'b1;
         desc_free_tail_q <= desc_free_tail_q + 1'b1;
         meta_desc_free_valid_q <= 1'b1;
-        meta_desc_free_addr_q <= deq_desc_s;
+        meta_desc_free_addr_q <= deq_desc_q;
         meta_desc_rd_valid_q <= 1'b1;
-        meta_desc_rd_addr_q <= deq_desc_s;
-        out_rank_q[deq_port_s*RANK_WIDTH +: RANK_WIDTH] <= deq_rank_s;
-        out_seq_q[deq_port_s*SEQ_WIDTH +: SEQ_WIDTH] <= deq_seq_s;
-        out_cell_count_q[deq_port_s*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH] <= deq_cells_raw_s;
-        out_payload_q[deq_port_s*PAYLOAD_WIDTH +: PAYLOAD_WIDTH] <=
-          payload_from_desc(deq_desc_s);
-        if (deq_from_sram_s) begin
-          sram_count_q[deq_port_s] <= sram_count_q[deq_port_s] - deq_cells_s;
-          global_sram_occ_q <= global_sram_occ_q - deq_cells_s;
-          sram_free_count_q <= sram_free_count_q + deq_cells_s;
-          sram_release_tail_q <= sram_release_tail_q + deq_cells_s[SRAM_SLOT_W-1:0];
+        meta_desc_rd_addr_q <= deq_desc_q;
+        out_rank_q[deq_port_q*RANK_WIDTH +: RANK_WIDTH] <= deq_rank_q;
+        out_seq_q[deq_port_q*SEQ_WIDTH +: SEQ_WIDTH] <= deq_seq_q;
+        out_cell_count_q[deq_port_q*CELL_COUNT_WIDTH +: CELL_COUNT_WIDTH] <= deq_cells_raw_q;
+        out_payload_q[deq_port_q*PAYLOAD_WIDTH +: PAYLOAD_WIDTH] <=
+          payload_from_desc(deq_desc_q);
+        if (deq_from_sram_q) begin
+          for (pi = 0; pi < PORTS; pi = pi + 1) begin
+            if (deq_port_q == PORT_W'(pi)) begin
+              sram_count_q[pi] <= count_sub_small(sram_count_q[pi], cell_count_count(deq_cells_q));
+            end
+          end
+          global_sram_occ_q <= count_sub_small(global_sram_occ_q, cell_count_count(deq_cells_q));
+          sram_free_count_q <= sram_free_add_small(sram_free_count_q, deq_cells_sram_q);
+          sram_release_tail_q <= sram_release_tail_q +
+                                 {{(SRAM_SLOT_W-CELL_COUNT_WIDTH){1'b0}}, deq_cells_q};
           meta_sram_release_valid_q <= 1'b1;
           meta_sram_release_base_q <= sram_release_tail_q;
-          meta_sram_release_cells_q <= deq_cells_s;
-          out_valid_q[deq_port_s] <= 1'b1;
+          meta_sram_release_cells_q <= deq_cells_q;
+          out_valid_q[deq_port_q] <= 1'b1;
+          out_busy_q[deq_port_q] <= 1'b1;
         end else begin
-          hbm_count_q[deq_port_s] <= hbm_count_q[deq_port_s] - deq_cells_s;
-          global_hbm_occ_q <= global_hbm_occ_q - deq_cells_s;
-          ddr_free_cell_count_q <= ddr_free_cell_count_q + deq_cells_s;
+          for (pi = 0; pi < PORTS; pi = pi + 1) begin
+            if (deq_port_q == PORT_W'(pi)) begin
+              hbm_count_q[pi] <= count_sub_small(hbm_count_q[pi], cell_count_count(deq_cells_q));
+            end
+          end
+          global_hbm_occ_q <= count_sub_small(global_hbm_occ_q, cell_count_count(deq_cells_q));
+          ddr_free_cell_count_q <= count_add_small(ddr_free_cell_count_q, cell_count_count(deq_cells_q));
           rd_direct_q <= 1'b1;
-          rd_port_q <= deq_port_s;
-          rd_desc_q <= deq_desc_s;
-          rd_rank_q <= deq_rank_s;
-          rd_seq_q <= deq_seq_s;
-          rd_cells_raw_q <= deq_cells_raw_s;
-          rd_cells_q <= deq_cells_s;
-          rd_batch_q <= deq_batch_s;
+          rd_port_q <= deq_port_q;
+          rd_desc_q <= deq_desc_q;
+          rd_rank_q <= deq_rank_q;
+          rd_seq_q <= deq_seq_q;
+          rd_cells_raw_q <= deq_cells_raw_q;
+          rd_cells_q <= cell_count_count(deq_cells_q);
+          rd_batch_q <= deq_batch_q;
           stat_direct_hbm_dequeue <= stat_direct_hbm_dequeue + 32'd1;
           meta_batch_release_valid_q <= 1'b1;
-          meta_batch_release_id_q <= deq_batch_s;
+          meta_batch_release_id_q <= deq_batch_q;
         end
         stat_dequeued <= stat_dequeued + 32'd1;
-      end else if (ingress_fire_s) begin
+      end else if (ingress_valid_q) begin
         desc_alloc_head_q <= desc_alloc_head_q + 1'b1;
         desc_free_count_q <= desc_free_count_q - 1'b1;
         stat_generated <= stat_generated + 32'd1;
         meta_desc_wr_valid_q <= 1'b1;
-        meta_desc_wr_addr_q <= ingress_desc_s;
-        meta_desc_wr_loc_q <= ingress_to_hbm_s;
-        meta_desc_wr_port_q <= ingress_port_s;
-        meta_desc_wr_rank_q <= ingress_rank_s;
-        meta_desc_wr_seq_q <= ingress_seq_s;
-        meta_desc_wr_cell_count_q <= ingress_cells_raw_s;
-        meta_desc_wr_payload_q <= ingress_payload_s;
+        meta_desc_wr_addr_q <= ingress_desc_q;
+        meta_desc_wr_loc_q <= ingress_to_hbm_q;
+        meta_desc_wr_port_q <= ingress_port_q;
+        meta_desc_wr_rank_q <= ingress_rank_q;
+        meta_desc_wr_seq_q <= ingress_seq_q;
+        meta_desc_wr_cell_count_q <= ingress_cells_raw_q;
+        meta_desc_wr_payload_q <= ingress_payload_q;
         meta_desc_wr_sram_base_q <= sram_alloc_head_q;
-        meta_desc_wr_batch_id_q <= ingress_batch_s;
-        meta_desc_wr_batch_offset_q <= ingress_batch_off_s;
-        if (ingress_to_sram_s) begin
-          sram_count_q[ingress_port_s] <= sram_count_q[ingress_port_s] + ingress_cells_s;
-          global_sram_occ_q <= global_sram_occ_q + ingress_cells_s;
-          sram_free_count_q <= sram_free_count_q - ingress_cells_s;
-          sram_alloc_head_q <= sram_alloc_head_q + ingress_cells_s[SRAM_SLOT_W-1:0];
+        meta_desc_wr_batch_id_q <= ingress_batch_q;
+        meta_desc_wr_batch_offset_q <= ingress_batch_off_q;
+        if (ingress_to_sram_q) begin
+          for (pi = 0; pi < PORTS; pi = pi + 1) begin
+            if (ingress_port_q == PORT_W'(pi)) begin
+              sram_count_q[pi] <= count_add_small(sram_count_q[pi], cell_count_count(ingress_cells_q));
+            end
+          end
+          global_sram_occ_q <= count_add_small(global_sram_occ_q, cell_count_count(ingress_cells_q));
+          sram_free_count_q <= sram_free_sub_small(sram_free_count_q, ingress_cells_sram_q);
+          sram_alloc_head_q <= sram_alloc_head_q +
+                               {{(SRAM_SLOT_W-CELL_COUNT_WIDTH){1'b0}}, ingress_cells_q};
           meta_sram_alloc_valid_q <= 1'b1;
-          meta_sram_alloc_cells_q <= ingress_cells_s;
+          meta_sram_alloc_cells_q <= ingress_cells_q;
           stat_sram_admit <= stat_sram_admit + 32'd1;
         end else begin
-          hbm_count_q[ingress_port_s] <= hbm_count_q[ingress_port_s] + ingress_cells_s;
-          global_hbm_occ_q <= global_hbm_occ_q + ingress_cells_s;
-          ddr_free_cell_count_q <= ddr_free_cell_count_q - ingress_cells_s;
+          for (pi = 0; pi < PORTS; pi = pi + 1) begin
+            if (ingress_port_q == PORT_W'(pi)) begin
+              hbm_count_q[pi] <= count_add_small(hbm_count_q[pi], cell_count_count(ingress_cells_q));
+            end
+          end
+          global_hbm_occ_q <= count_add_small(global_hbm_occ_q, cell_count_count(ingress_cells_q));
+          ddr_free_cell_count_q <= count_sub_small(ddr_free_cell_count_q, cell_count_count(ingress_cells_q));
           meta_batch_append_valid_q <= 1'b1;
-          meta_batch_append_id_q <= ingress_batch_s;
-          meta_batch_append_offset_q <= ingress_batch_off_s;
-          meta_batch_append_desc_q <= ingress_desc_s;
-          meta_batch_append_cells_q <= ingress_cells_s;
+          meta_batch_append_id_q <= ingress_batch_q;
+          meta_batch_append_offset_q <= ingress_batch_off_q;
+          meta_batch_append_desc_q <= ingress_desc_q;
+          meta_batch_append_cells_q <= ingress_cells_q;
           if (!open_batch_valid_q) begin
             open_batch_valid_q <= 1'b1;
-            open_batch_id_q <= batch_alloc_head_q;
+            open_batch_id_q <= ingress_batch_q;
             batch_alloc_head_q <= batch_alloc_head_q + 1'b1;
             batch_free_count_q <= batch_free_count_q - 1'b1;
           end
-          if ((open_batch_fill_q + ingress_cells_s[BATCH_OFF_W:0]) >= BATCH_SIZE_COUNT[BATCH_OFF_W:0]) begin
+          if ((open_batch_fill_q + ingress_cells_q[BATCH_OFF_W:0]) >= BATCH_SIZE_COUNT[BATCH_OFF_W:0]) begin
             open_batch_valid_q <= 1'b0;
             open_batch_fill_q <= '0;
             stat_batch_submit <= stat_batch_submit + 32'd1;
           end else begin
-            open_batch_fill_q <= open_batch_fill_q + ingress_cells_s[BATCH_OFF_W:0];
+            open_batch_fill_q <= open_batch_fill_q + ingress_cells_q[BATCH_OFF_W:0];
           end
           stat_hbm_admit <= stat_hbm_admit + 32'd1;
         end
-        ingress_rr_q <= ingress_port_s + 1'b1;
-      end else if (swapin_fire_exec_c) begin
-        sram_count_q[swapin_port_s] <= sram_count_q[swapin_port_s] + swapin_cells_s;
-        hbm_count_q[swapin_port_s] <= hbm_count_q[swapin_port_s] - swapin_cells_s;
-        global_sram_occ_q <= global_sram_occ_q + swapin_cells_s;
-        global_hbm_occ_q <= global_hbm_occ_q - swapin_cells_s;
-        sram_free_count_q <= sram_free_count_q - swapin_cells_s;
-        ddr_free_cell_count_q <= ddr_free_cell_count_q + swapin_cells_s;
-        sram_alloc_head_q <= sram_alloc_head_q + swapin_cells_s[SRAM_SLOT_W-1:0];
+        ingress_rr_q <= ingress_port_q + 1'b1;
+      end else if (port_op_valid[swapin_port_q] && (port_op_type[swapin_port_q*3 +: 3] == 3'd4)) begin
+        for (pi = 0; pi < PORTS; pi = pi + 1) begin
+          if (swapin_port_q == PORT_W'(pi)) begin
+            sram_count_q[pi] <= count_add_small(sram_count_q[pi], cell_count_count(swapin_cells_q));
+            hbm_count_q[pi] <= count_sub_small(hbm_count_q[pi], cell_count_count(swapin_cells_q));
+          end
+        end
+        global_sram_occ_q <= count_add_small(global_sram_occ_q, cell_count_count(swapin_cells_q));
+        global_hbm_occ_q <= count_sub_small(global_hbm_occ_q, cell_count_count(swapin_cells_q));
+        sram_free_count_q <= sram_free_sub_small(sram_free_count_q, swapin_cells_sram_q);
+        ddr_free_cell_count_q <= count_add_small(ddr_free_cell_count_q, cell_count_count(swapin_cells_q));
+        sram_alloc_head_q <= sram_alloc_head_q +
+                             {{(SRAM_SLOT_W-CELL_COUNT_WIDTH){1'b0}}, swapin_cells_q};
         rd_direct_q <= 1'b0;
-        rd_port_q <= swapin_port_s;
-        rd_desc_q <= swapin_desc_s;
-        rd_rank_q <= swapin_rank_s;
-        rd_seq_q <= swapin_seq_s;
-        rd_cells_raw_q <= swapin_cells_raw_s;
-        rd_cells_q <= swapin_cells_s;
-        rd_batch_q <= swapin_batch_s;
+        rd_port_q <= swapin_port_q;
+        rd_desc_q <= swapin_desc_q;
+        rd_rank_q <= swapin_rank_q;
+        rd_seq_q <= swapin_seq_q;
+        rd_cells_raw_q <= swapin_cells_raw_q;
+        rd_cells_q <= cell_count_count(swapin_cells_q);
+        rd_batch_q <= swapin_batch_q;
         meta_sram_alloc_valid_q <= 1'b1;
-        meta_sram_alloc_cells_q <= swapin_cells_s;
+        meta_sram_alloc_cells_q <= swapin_cells_q;
         meta_batch_release_valid_q <= 1'b1;
-        meta_batch_release_id_q <= swapin_batch_s;
+        meta_batch_release_id_q <= swapin_batch_q;
         stat_swap_in <= stat_swap_in + 32'd1;
-      end else if (swapout_fire_exec_c) begin
-        sram_count_q[swapout_port_s] <= sram_count_q[swapout_port_s] - swapout_cells_s;
-        hbm_count_q[swapout_port_s] <= hbm_count_q[swapout_port_s] + swapout_cells_s;
-        global_sram_occ_q <= global_sram_occ_q - swapout_cells_s;
-        global_hbm_occ_q <= global_hbm_occ_q + swapout_cells_s;
-        sram_free_count_q <= sram_free_count_q + swapout_cells_s;
-        ddr_free_cell_count_q <= ddr_free_cell_count_q - swapout_cells_s;
-        sram_release_tail_q <= sram_release_tail_q + swapout_cells_s[SRAM_SLOT_W-1:0];
+      end else if (port_op_valid[swapout_port_q] && (port_op_type[swapout_port_q*3 +: 3] == 3'd5)) begin
+        for (pi = 0; pi < PORTS; pi = pi + 1) begin
+          if (swapout_port_q == PORT_W'(pi)) begin
+            sram_count_q[pi] <= count_sub_small(sram_count_q[pi], cell_count_count(swapout_cells_q));
+            hbm_count_q[pi] <= count_add_small(hbm_count_q[pi], cell_count_count(swapout_cells_q));
+          end
+        end
+        global_sram_occ_q <= count_sub_small(global_sram_occ_q, cell_count_count(swapout_cells_q));
+        global_hbm_occ_q <= count_add_small(global_hbm_occ_q, cell_count_count(swapout_cells_q));
+        sram_free_count_q <= sram_free_add_small(sram_free_count_q, swapout_cells_sram_q);
+        ddr_free_cell_count_q <= count_sub_small(ddr_free_cell_count_q, cell_count_count(swapout_cells_q));
+        sram_release_tail_q <= sram_release_tail_q +
+                               {{(SRAM_SLOT_W-CELL_COUNT_WIDTH){1'b0}}, swapout_cells_q};
         meta_sram_release_valid_q <= 1'b1;
         meta_sram_release_base_q <= sram_release_tail_q;
-        meta_sram_release_cells_q <= swapout_cells_s;
+        meta_sram_release_cells_q <= swapout_cells_q;
         meta_batch_append_valid_q <= 1'b1;
         meta_batch_append_id_q <= open_batch_valid_q ? open_batch_id_q : batch_alloc_head_q;
         meta_batch_append_offset_q <= open_batch_fill_q[BATCH_OFF_W-1:0];
-        meta_batch_append_desc_q <= swapout_desc_s;
-        meta_batch_append_cells_q <= swapout_cells_s;
+        meta_batch_append_desc_q <= swapout_desc_q;
+        meta_batch_append_cells_q <= swapout_cells_q;
         stat_swap_out <= stat_swap_out + 32'd1;
         stat_batch_submit <= stat_batch_submit + 32'd1;
-      end else if (s_pkt_valid && !s_pkt_ready) begin
+      end
+
+      if (stat_drop_pending_q) begin
         stat_drop <= stat_drop + 32'd1;
       end
 
@@ -2315,13 +2279,13 @@ module hestia_core_ddr_bbq_extmeta #(
         WR_IDLE: begin
           if (wr_start_c) begin
             wr_batch_q <= wr_start_batch_c;
-            wr_beat_q <= '0;
             wr_desc_q <= wr_start_desc_c;
             wr_rank_q <= wr_start_rank_c;
             wr_seq_q <= wr_start_seq_c;
             wr_cells_raw_q <= wr_start_cells_raw_c;
             wr_batch_off_q <= wr_start_batch_off_c;
             wr_payload_q <= wr_start_payload_c;
+            wr_beat_q <= '0;
             m_axi_awid <= '0;
             m_axi_awaddr <= ddr_batch_addr(wr_start_batch_c);
             m_axi_awlen <= BATCH_SIZE - 1;
@@ -2337,9 +2301,9 @@ module hestia_core_ddr_bbq_extmeta #(
             m_axi_wvalid <= 1'b1;
             m_axi_wlast <= (BATCH_SIZE == 1);
             m_axi_wdata <= pack_axi_digest_cell(wr_desc_q, wr_rank_q, wr_seq_q,
-                                                wr_cells_raw_q, wr_batch_off_q,
-                                                wr_payload_q) ^
-                           {{(AXI_DATA_WIDTH-64){1'b0}}, observability_digest_c};
+                                                wr_cells_raw_q, wr_batch_off_q, wr_payload_q) ^
+                           {{(AXI_DATA_WIDTH-64){1'b0}},
+                            meta_digest ^ selected_policy_digest_c};
             wr_state_q <= WR_DATA;
           end
         end
@@ -2367,13 +2331,6 @@ module hestia_core_ddr_bbq_extmeta #(
             stat_ddr_write_batches <= stat_ddr_write_batches + 32'd1;
             wr_state_q <= WR_IDLE;
           end
-        end
-        default: begin
-          m_axi_awvalid <= 1'b0;
-          m_axi_wvalid <= 1'b0;
-          m_axi_wlast <= 1'b0;
-          m_axi_bready <= 1'b0;
-          wr_state_q <= WR_IDLE;
         end
       endcase
 
@@ -2410,17 +2367,13 @@ module hestia_core_ddr_bbq_extmeta #(
                 out_payload_q[rd_port_q*PAYLOAD_WIDTH +: PAYLOAD_WIDTH] <=
                   m_axi_rdata[PAYLOAD_WIDTH-1:0];
                 out_valid_q[rd_port_q] <= 1'b1;
+                out_busy_q[rd_port_q] <= 1'b1;
               end
               rd_state_q <= RD_IDLE;
             end else begin
               rd_beat_q <= rd_beat_q + 1'b1;
             end
           end
-        end
-        default: begin
-          m_axi_arvalid <= 1'b0;
-          m_axi_rready <= 1'b0;
-          rd_state_q <= RD_IDLE;
         end
       endcase
     end

@@ -5,6 +5,7 @@ module hestia_policy_hybrid_themis #(
   parameter int CELL_COUNT_WIDTH = 4,
   parameter int OCC_WIDTH = 16,
   parameter int ALPHA_SHIFT_WIDTH = 4,
+  parameter int STATIC_ALPHA_SHIFT = -1,
   localparam int PORT_W = (PORTS <= 2) ? 1 : $clog2(PORTS)
 ) (
   input  logic                         clk,
@@ -74,7 +75,11 @@ module hestia_policy_hybrid_themis #(
   integer si;
   integer idx;
   always_comb begin
-    threshold_wide = {{(THRESH_W-OCC_WIDTH){1'b0}}, free_cells} << cfg_alpha_shift;
+    if (STATIC_ALPHA_SHIFT >= 0) begin
+      threshold_wide = {{(THRESH_W-OCC_WIDTH){1'b0}}, free_cells} << STATIC_ALPHA_SHIFT;
+    end else begin
+      threshold_wide = {{(THRESH_W-OCC_WIDTH){1'b0}}, free_cells} << cfg_alpha_shift;
+    end
     if (|threshold_wide[THRESH_W-1:OCC_WIDTH]) begin
       threshold = '1;
     end else begin

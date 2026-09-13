@@ -19,12 +19,9 @@ module hestia_asic_core #(
   parameter int BATCH_SLOTS = 8388608,
   parameter int PACKET_SLOTS = 81920,
   parameter int BBQ_BITMAP_WIDTH = 32,
-  parameter int POLICY_MODE = -1,
+  parameter int POLICY_MODE = 3,
   parameter int POLICY_ALPHA_SHIFT = 0,
   parameter int POLICY_ALPHA_SHIFT_WIDTH = 4,
-  parameter bit ENABLE_OBSERVABILITY = 1'b0,
-  parameter bit PIPELINE_SCHEDULER_CANDIDATES = 1'b1,
-  parameter bit PIPELINE_PORT_QUEUE_INPUTS = 1'b0,
   parameter logic [AXI_ADDR_WIDTH-1:0] DDR_BASE_ADDR = 64'h0,
   localparam int PORT_W = (PORTS <= 2) ? 1 : $clog2(PORTS),
   localparam int AXI_KEEP_WIDTH = AXI_DATA_WIDTH / 8
@@ -110,9 +107,6 @@ module hestia_asic_core #(
     .EXTERNAL_METADATA(1'b1),
     .ENABLE_DDR_META_CHECK(1'b0),
     .USE_ASIC_MEMORY_MACROS(1'b1),
-    .ENABLE_OBSERVABILITY(ENABLE_OBSERVABILITY),
-    .PIPELINE_SCHEDULER_CANDIDATES(PIPELINE_SCHEDULER_CANDIDATES),
-    .PIPELINE_PORT_QUEUE_INPUTS(PIPELINE_PORT_QUEUE_INPUTS),
     .DDR_BASE_ADDR(DDR_BASE_ADDR)
   ) core (
     .clk(clk),

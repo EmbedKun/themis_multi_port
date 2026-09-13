@@ -9,9 +9,16 @@ module hestia_paper_scale_port_queue #(
   parameter int BATCH_OFF_W = 3,
   parameter int BBQ_BITMAP_WIDTH = 32,
   parameter int OCC_WIDTH = 27,
-  parameter bit INPUT_PIPELINE = 1'b0,
+  parameter bit TRACK_OCCUPANCY = 1'b1,
   parameter bit ENABLE_DIGEST = 1'b1,
+  parameter bit TRACK_SRAM_MAX = 1'b1,
+  parameter bit FAST_RANK_COMPARE = 1'b0,
+  parameter bit INPUT_PIPELINE = 1'b0,
   localparam int LEVEL_W = $clog2(BBQ_BITMAP_WIDTH),
+  localparam int ENCODER_GROUP_W = 4,
+  localparam int ENCODER_GROUPS = BBQ_BITMAP_WIDTH / ENCODER_GROUP_W,
+  localparam int ENCODER_GROUP_IDX_W = $clog2(ENCODER_GROUPS),
+  localparam int ENCODER_LOCAL_W = $clog2(ENCODER_GROUP_W),
   localparam int PIPE_W = RANK_WIDTH + SEQ_WIDTH + CELL_COUNT_WIDTH +
                           DESC_W + BATCH_ID_W + BATCH_OFF_W + 8
 ) (
@@ -62,11 +69,68 @@ module hestia_paper_scale_port_queue #(
   logic [LEVEL_W-1:0] sram_l1_min_idx_q;
   logic [LEVEL_W-1:0] sram_l1_max_idx_q;
   logic [LEVEL_W-1:0] ddr_l1_min_idx_q;
-  logic [LEVEL_W-1:0] ddr_l1_max_idx_q;
   logic [LEVEL_W-1:0] sram_l2_min_idx_q;
   logic [LEVEL_W-1:0] sram_l2_max_idx_q;
   logic [LEVEL_W-1:0] ddr_l2_min_idx_q;
-  logic [LEVEL_W-1:0] ddr_l2_max_idx_q;
+  logic [ENCODER_GROUPS-1:0] sram_l1_min_group_valid_q;
+  logic [ENCODER_GROUPS*ENCODER_LOCAL_W-1:0] sram_l1_min_group_idx_q;
+  logic [ENCODER_GROUPS-1:0] ddr_l1_min_group_valid_q;
+  logic [ENCODER_GROUPS*ENCODER_LOCAL_W-1:0] ddr_l1_min_group_idx_q;
+  logic [ENCODER_GROUPS-1:0] sram_l2_min_group_valid_q;
+  logic [ENCODER_GROUPS*ENCODER_LOCAL_W-1:0] sram_l2_min_group_idx_q;
+  logic [ENCODER_GROUPS-1:0] ddr_l2_min_group_valid_q;
+  logic [ENCODER_GROUPS*ENCODER_LOCAL_W-1:0] ddr_l2_min_group_idx_q;
+  logic [ENCODER_GROUPS-1:0] sram_l1_max_group_valid_q;
+  logic [ENCODER_GROUPS*ENCODER_LOCAL_W-1:0] sram_l1_max_group_idx_q;
+  logic [ENCODER_GROUPS-1:0] sram_l2_max_group_valid_q;
+  logic [ENCODER_GROUPS*ENCODER_LOCAL_W-1:0] sram_l2_max_group_idx_q;
+  logic op_valid_p;
+  logic [2:0] op_type_p;
+  logic op_tier_p;
+  logic [RANK_WIDTH-1:0] op_rank_p;
+  logic [SEQ_WIDTH-1:0] op_seq_p;
+  logic [CELL_COUNT_WIDTH-1:0] op_cell_count_p;
+  logic [DESC_W-1:0] op_desc_p;
+  logic [BATCH_ID_W-1:0] op_batch_id_p;
+  logic [BATCH_OFF_W-1:0] op_batch_off_p;
+
+  generate
+    if (INPUT_PIPELINE) begin : gen_input_pipeline
+      always_ff @(posedge clk) begin
+        if (!resetn) begin
+          op_valid_p <= 1'b0;
+          op_type_p <= '0;
+          op_tier_p <= 1'b0;
+          op_rank_p <= '0;
+          op_seq_p <= '0;
+          op_cell_count_p <= '0;
+          op_desc_p <= '0;
+          op_batch_id_p <= '0;
+          op_batch_off_p <= '0;
+        end else begin
+          op_valid_p <= op_valid;
+          op_type_p <= op_type;
+          op_tier_p <= op_tier;
+          op_rank_p <= op_rank;
+          op_seq_p <= op_seq;
+          op_cell_count_p <= op_cell_count;
+          op_desc_p <= op_desc;
+          op_batch_id_p <= op_batch_id;
+          op_batch_off_p <= op_batch_off;
+        end
+      end
+    end else begin : gen_no_input_pipeline
+      assign op_valid_p = op_valid;
+      assign op_type_p = op_type;
+      assign op_tier_p = op_tier;
+      assign op_rank_p = op_rank;
+      assign op_seq_p = op_seq;
+      assign op_cell_count_p = op_cell_count;
+      assign op_desc_p = op_desc;
+      assign op_batch_id_p = op_batch_id;
+      assign op_batch_off_p = op_batch_off;
+    end
+  endgenerate
 
   function automatic logic [LEVEL_W-1:0] find_first(input bitmap_t bits_i);
     int i;
@@ -98,6 +162,110 @@ module hestia_paper_scale_port_queue #(
     end
   endfunction
 
+  function automatic logic [ENCODER_LOCAL_W-1:0] find_first4(
+    input logic [ENCODER_GROUP_W-1:0] bits_i
+  );
+    begin
+      unique casez (bits_i)
+        4'b???1: find_first4 = 2'd0;
+        4'b??10: find_first4 = 2'd1;
+        4'b?100: find_first4 = 2'd2;
+        default: find_first4 = 2'd3;
+      endcase
+    end
+  endfunction
+
+  function automatic logic [ENCODER_LOCAL_W-1:0] find_last4(
+    input logic [ENCODER_GROUP_W-1:0] bits_i
+  );
+    begin
+      unique casez (bits_i)
+        4'b1???: find_last4 = 2'd3;
+        4'b01??: find_last4 = 2'd2;
+        4'b001?: find_last4 = 2'd1;
+        default: find_last4 = 2'd0;
+      endcase
+    end
+  endfunction
+
+  function automatic logic [LEVEL_W-1:0] combine_first_groups(
+    input logic [ENCODER_GROUPS-1:0] valid_i,
+    input logic [ENCODER_GROUPS*ENCODER_LOCAL_W-1:0] local_idx_i
+  );
+    logic [ENCODER_GROUP_IDX_W-1:0] group_idx_v;
+    logic found_v;
+    logic [7:0] valid8_v;
+    begin
+      group_idx_v = '0;
+      found_v = 1'b0;
+      valid8_v = '0;
+      for (int gi = 0; gi < ENCODER_GROUPS; gi = gi + 1) begin
+        if (gi < 8) begin
+          valid8_v[gi] = valid_i[gi];
+        end
+      end
+      if (ENCODER_GROUPS == 8) begin
+        unique casez (valid8_v)
+          8'b???????1: group_idx_v = ENCODER_GROUP_IDX_W'(0);
+          8'b??????10: group_idx_v = ENCODER_GROUP_IDX_W'(1);
+          8'b?????100: group_idx_v = ENCODER_GROUP_IDX_W'(2);
+          8'b????1000: group_idx_v = ENCODER_GROUP_IDX_W'(3);
+          8'b???10000: group_idx_v = ENCODER_GROUP_IDX_W'(4);
+          8'b??100000: group_idx_v = ENCODER_GROUP_IDX_W'(5);
+          8'b?1000000: group_idx_v = ENCODER_GROUP_IDX_W'(6);
+          default:     group_idx_v = ENCODER_GROUP_IDX_W'(7);
+        endcase
+      end else begin
+        for (int gi = 0; gi < ENCODER_GROUPS; gi = gi + 1) begin
+          if (!found_v && valid_i[gi]) begin
+            group_idx_v = ENCODER_GROUP_IDX_W'(gi);
+            found_v = 1'b1;
+          end
+        end
+      end
+      combine_first_groups = {group_idx_v, local_idx_i[group_idx_v*ENCODER_LOCAL_W +: ENCODER_LOCAL_W]};
+    end
+  endfunction
+
+  function automatic logic [LEVEL_W-1:0] combine_last_groups(
+    input logic [ENCODER_GROUPS-1:0] valid_i,
+    input logic [ENCODER_GROUPS*ENCODER_LOCAL_W-1:0] local_idx_i
+  );
+    logic [ENCODER_GROUP_IDX_W-1:0] group_idx_v;
+    logic found_v;
+    logic [7:0] valid8_v;
+    begin
+      group_idx_v = '0;
+      found_v = 1'b0;
+      valid8_v = '0;
+      for (int gi = 0; gi < ENCODER_GROUPS; gi = gi + 1) begin
+        if (gi < 8) begin
+          valid8_v[gi] = valid_i[gi];
+        end
+      end
+      if (ENCODER_GROUPS == 8) begin
+        unique casez (valid8_v)
+          8'b1???????: group_idx_v = ENCODER_GROUP_IDX_W'(7);
+          8'b01??????: group_idx_v = ENCODER_GROUP_IDX_W'(6);
+          8'b001?????: group_idx_v = ENCODER_GROUP_IDX_W'(5);
+          8'b0001????: group_idx_v = ENCODER_GROUP_IDX_W'(4);
+          8'b00001???: group_idx_v = ENCODER_GROUP_IDX_W'(3);
+          8'b000001??: group_idx_v = ENCODER_GROUP_IDX_W'(2);
+          8'b0000001?: group_idx_v = ENCODER_GROUP_IDX_W'(1);
+          default:     group_idx_v = ENCODER_GROUP_IDX_W'(0);
+        endcase
+      end else begin
+        for (int gi = ENCODER_GROUPS - 1; gi >= 0; gi = gi - 1) begin
+          if (!found_v && valid_i[gi]) begin
+            group_idx_v = ENCODER_GROUP_IDX_W'(gi);
+            found_v = 1'b1;
+          end
+        end
+      end
+      combine_last_groups = {group_idx_v, local_idx_i[group_idx_v*ENCODER_LOCAL_W +: ENCODER_LOCAL_W]};
+    end
+  endfunction
+
   function automatic logic rank_less(
     input logic [RANK_WIDTH-1:0] a_rank,
     input logic [SEQ_WIDTH-1:0] a_seq,
@@ -105,7 +273,11 @@ module hestia_paper_scale_port_queue #(
     input logic [SEQ_WIDTH-1:0] b_seq
   );
     begin
-      rank_less = (a_rank < b_rank) || ((a_rank == b_rank) && (a_seq < b_seq));
+      if (FAST_RANK_COMPARE) begin
+        rank_less = (a_rank < b_rank);
+      end else begin
+        rank_less = (a_rank < b_rank) || ((a_rank == b_rank) && (a_seq < b_seq));
+      end
     end
   endfunction
 
@@ -116,7 +288,11 @@ module hestia_paper_scale_port_queue #(
     input logic [SEQ_WIDTH-1:0] b_seq
   );
     begin
-      rank_greater = (a_rank > b_rank) || ((a_rank == b_rank) && (a_seq > b_seq));
+      if (FAST_RANK_COMPARE) begin
+        rank_greater = (a_rank > b_rank);
+      end else begin
+        rank_greater = (a_rank > b_rank) || ((a_rank == b_rank) && (a_seq > b_seq));
+      end
     end
   endfunction
 
@@ -175,56 +351,8 @@ module hestia_paper_scale_port_queue #(
     end
   endfunction
 
-  assign sram_occupancy = sram_occ_q;
-  assign ddr_occupancy = ddr_occ_q;
-
-  logic                         op_valid_eff;
-  logic [2:0]                   op_type_eff;
-  logic                         op_tier_eff;
-  logic [RANK_WIDTH-1:0]        op_rank_eff;
-  logic [SEQ_WIDTH-1:0]         op_seq_eff;
-  logic [CELL_COUNT_WIDTH-1:0]  op_cell_count_eff;
-  logic [DESC_W-1:0]            op_desc_eff;
-  logic [BATCH_ID_W-1:0]        op_batch_id_eff;
-  logic [BATCH_OFF_W-1:0]       op_batch_off_eff;
-
-  generate
-    if (INPUT_PIPELINE) begin : gen_op_input_pipeline
-      always_ff @(posedge clk) begin
-        if (!resetn) begin
-          op_valid_eff <= 1'b0;
-          op_type_eff <= '0;
-          op_tier_eff <= 1'b0;
-          op_rank_eff <= '0;
-          op_seq_eff <= '0;
-          op_cell_count_eff <= '0;
-          op_desc_eff <= '0;
-          op_batch_id_eff <= '0;
-          op_batch_off_eff <= '0;
-        end else begin
-          op_valid_eff <= op_valid;
-          op_type_eff <= op_type;
-          op_tier_eff <= op_tier;
-          op_rank_eff <= op_rank;
-          op_seq_eff <= op_seq;
-          op_cell_count_eff <= op_cell_count;
-          op_desc_eff <= op_desc;
-          op_batch_id_eff <= op_batch_id;
-          op_batch_off_eff <= op_batch_off;
-        end
-      end
-    end else begin : gen_op_input_passthrough
-      assign op_valid_eff = op_valid;
-      assign op_type_eff = op_type;
-      assign op_tier_eff = op_tier;
-      assign op_rank_eff = op_rank;
-      assign op_seq_eff = op_seq;
-      assign op_cell_count_eff = op_cell_count;
-      assign op_desc_eff = op_desc;
-      assign op_batch_id_eff = op_batch_id;
-      assign op_batch_off_eff = op_batch_off;
-    end
-  endgenerate
+  assign sram_occupancy = TRACK_OCCUPANCY ? sram_occ_q : '0;
+  assign ddr_occupancy = TRACK_OCCUPANCY ? ddr_occ_q : '0;
 
   always_ff @(posedge clk) begin
     logic [PIPE_W-1:0] in_word;
@@ -233,12 +361,11 @@ module hestia_paper_scale_port_queue #(
     logic [OCC_WIDTH-1:0] cells_ext;
     int stage;
 
-    in_word = pack_op(op_type_eff, op_tier_eff, op_rank_eff, op_seq_eff,
-                      op_cell_count_eff, op_desc_eff, op_batch_id_eff,
-                      op_batch_off_eff);
-    l1_idx = op_rank_eff[RANK_WIDTH-1 -: LEVEL_W];
-    l2_idx = op_rank_eff[LEVEL_W-1:0];
-    cells_ext = {{(OCC_WIDTH-CELL_COUNT_WIDTH){1'b0}}, op_cell_count_eff};
+    in_word = pack_op(op_type_p, op_tier_p, op_rank_p, op_seq_p, op_cell_count_p,
+                      op_desc_p, op_batch_id_p, op_batch_off_p);
+    l1_idx = op_rank_p[RANK_WIDTH-1 -: LEVEL_W];
+    l2_idx = op_rank_p[LEVEL_W-1:0];
+    cells_ext = {{(OCC_WIDTH-CELL_COUNT_WIDTH){1'b0}}, op_cell_count_p};
 
     if (!resetn) begin
       sram_l1_q <= '0;
@@ -251,11 +378,21 @@ module hestia_paper_scale_port_queue #(
       sram_l1_min_idx_q <= '0;
       sram_l1_max_idx_q <= '0;
       ddr_l1_min_idx_q <= '0;
-      ddr_l1_max_idx_q <= '0;
       sram_l2_min_idx_q <= '0;
       sram_l2_max_idx_q <= '0;
       ddr_l2_min_idx_q <= '0;
-      ddr_l2_max_idx_q <= '0;
+      sram_l1_min_group_valid_q <= '0;
+      sram_l1_min_group_idx_q <= '0;
+      ddr_l1_min_group_valid_q <= '0;
+      ddr_l1_min_group_idx_q <= '0;
+      sram_l2_min_group_valid_q <= '0;
+      sram_l2_min_group_idx_q <= '0;
+      ddr_l2_min_group_valid_q <= '0;
+      ddr_l2_min_group_idx_q <= '0;
+      sram_l1_max_group_valid_q <= '0;
+      sram_l1_max_group_idx_q <= '0;
+      sram_l2_max_group_valid_q <= '0;
+      sram_l2_max_group_idx_q <= '0;
       sram_min_valid <= 1'b0;
       sram_max_valid <= 1'b0;
       ddr_min_valid <= 1'b0;
@@ -279,113 +416,150 @@ module hestia_paper_scale_port_queue #(
       end
     end else begin
       if (ENABLE_DIGEST) begin
-        valid_pipe_q <= {valid_pipe_q[9:0], op_valid_eff};
+        valid_pipe_q <= {valid_pipe_q[9:0], op_valid_p};
         pipe_q[0] <= in_word;
         for (stage = 1; stage < 11; stage = stage + 1) begin
           pipe_q[stage] <= pipe_q[stage-1] ^ fold_digest_to_pipe(digest);
         end
-      end else begin
-        valid_pipe_q <= '0;
-        digest <= '0;
       end
 
-      sram_l1_min_idx_q <= find_first(sram_l1_q);
-      sram_l1_max_idx_q <= find_last(sram_l1_q);
-      ddr_l1_min_idx_q <= find_first(ddr_l1_q);
-      ddr_l1_max_idx_q <= find_last(ddr_l1_q);
-      sram_l2_min_idx_q <= find_first(sram_l2_shadow_q);
-      sram_l2_max_idx_q <= find_last(sram_l2_shadow_q);
-      ddr_l2_min_idx_q <= find_first(ddr_l2_shadow_q);
-      ddr_l2_max_idx_q <= find_last(ddr_l2_shadow_q);
+      for (int gi = 0; gi < ENCODER_GROUPS; gi = gi + 1) begin
+        sram_l1_min_group_valid_q[gi] <= |sram_l1_q[gi*ENCODER_GROUP_W +: ENCODER_GROUP_W];
+        sram_l1_min_group_idx_q[gi*ENCODER_LOCAL_W +: ENCODER_LOCAL_W] <=
+          find_first4(sram_l1_q[gi*ENCODER_GROUP_W +: ENCODER_GROUP_W]);
+        ddr_l1_min_group_valid_q[gi] <= |ddr_l1_q[gi*ENCODER_GROUP_W +: ENCODER_GROUP_W];
+        ddr_l1_min_group_idx_q[gi*ENCODER_LOCAL_W +: ENCODER_LOCAL_W] <=
+          find_first4(ddr_l1_q[gi*ENCODER_GROUP_W +: ENCODER_GROUP_W]);
+        sram_l2_min_group_valid_q[gi] <= |sram_l2_shadow_q[gi*ENCODER_GROUP_W +: ENCODER_GROUP_W];
+        sram_l2_min_group_idx_q[gi*ENCODER_LOCAL_W +: ENCODER_LOCAL_W] <=
+          find_first4(sram_l2_shadow_q[gi*ENCODER_GROUP_W +: ENCODER_GROUP_W]);
+        ddr_l2_min_group_valid_q[gi] <= |ddr_l2_shadow_q[gi*ENCODER_GROUP_W +: ENCODER_GROUP_W];
+        ddr_l2_min_group_idx_q[gi*ENCODER_LOCAL_W +: ENCODER_LOCAL_W] <=
+          find_first4(ddr_l2_shadow_q[gi*ENCODER_GROUP_W +: ENCODER_GROUP_W]);
+        if (TRACK_SRAM_MAX) begin
+          sram_l1_max_group_valid_q[gi] <= |sram_l1_q[gi*ENCODER_GROUP_W +: ENCODER_GROUP_W];
+          sram_l1_max_group_idx_q[gi*ENCODER_LOCAL_W +: ENCODER_LOCAL_W] <=
+            find_last4(sram_l1_q[gi*ENCODER_GROUP_W +: ENCODER_GROUP_W]);
+          sram_l2_max_group_valid_q[gi] <= |sram_l2_shadow_q[gi*ENCODER_GROUP_W +: ENCODER_GROUP_W];
+          sram_l2_max_group_idx_q[gi*ENCODER_LOCAL_W +: ENCODER_LOCAL_W] <=
+            find_last4(sram_l2_shadow_q[gi*ENCODER_GROUP_W +: ENCODER_GROUP_W]);
+        end
+      end
 
-      if (op_valid_eff) begin
-        unique case (op_type_eff)
+      sram_l1_min_idx_q <= combine_first_groups(sram_l1_min_group_valid_q, sram_l1_min_group_idx_q);
+      if (TRACK_SRAM_MAX) begin
+        sram_l1_max_idx_q <= combine_last_groups(sram_l1_max_group_valid_q, sram_l1_max_group_idx_q);
+      end
+      ddr_l1_min_idx_q <= combine_first_groups(ddr_l1_min_group_valid_q, ddr_l1_min_group_idx_q);
+      sram_l2_min_idx_q <= combine_first_groups(sram_l2_min_group_valid_q, sram_l2_min_group_idx_q);
+      if (TRACK_SRAM_MAX) begin
+        sram_l2_max_idx_q <= combine_last_groups(sram_l2_max_group_valid_q, sram_l2_max_group_idx_q);
+      end
+      ddr_l2_min_idx_q <= combine_first_groups(ddr_l2_min_group_valid_q, ddr_l2_min_group_idx_q);
+
+      if (op_valid_p) begin
+        unique case (op_type_p)
           3'd1: begin
-            if (!op_tier_eff) begin
+            if (!op_tier_p) begin
               sram_l1_q[l1_idx] <= 1'b1;
               sram_l2_shadow_q[l2_idx] <= 1'b1;
-              sram_occ_q <= sram_occ_q + cells_ext;
-              if (!sram_min_valid || rank_less(op_rank_eff, op_seq_eff, sram_min_rank, sram_min_seq)) begin
-                sram_min_valid <= 1'b1;
-                sram_min_rank <= op_rank_eff;
-                sram_min_seq <= op_seq_eff;
-                sram_min_desc <= op_desc_eff;
-                sram_min_cell_count <= op_cell_count_eff;
+              if (TRACK_OCCUPANCY) begin
+                sram_occ_q <= sram_occ_q + cells_ext;
               end
-              if (!sram_max_valid || rank_greater(op_rank_eff, op_seq_eff, sram_max_rank, sram_max_seq)) begin
+              if (!sram_min_valid || rank_less(op_rank_p, op_seq_p, sram_min_rank, sram_min_seq)) begin
+                sram_min_valid <= 1'b1;
+                sram_min_rank <= op_rank_p;
+                sram_min_seq <= op_seq_p;
+                sram_min_desc <= op_desc_p;
+                sram_min_cell_count <= op_cell_count_p;
+              end
+              if (TRACK_SRAM_MAX &&
+                  (!sram_max_valid || rank_greater(op_rank_p, op_seq_p, sram_max_rank, sram_max_seq))) begin
                 sram_max_valid <= 1'b1;
-                sram_max_rank <= op_rank_eff;
-                sram_max_seq <= op_seq_eff;
-                sram_max_desc <= op_desc_eff;
-                sram_max_cell_count <= op_cell_count_eff;
+                sram_max_rank <= op_rank_p;
+                sram_max_seq <= op_seq_p;
+                sram_max_desc <= op_desc_p;
+                sram_max_cell_count <= op_cell_count_p;
               end
             end else begin
               ddr_l1_q[l1_idx] <= 1'b1;
               ddr_l2_shadow_q[l2_idx] <= 1'b1;
-              ddr_occ_q <= ddr_occ_q + cells_ext;
-              if (!ddr_min_valid || rank_less(op_rank_eff, op_seq_eff, ddr_min_rank, ddr_min_seq)) begin
+              if (TRACK_OCCUPANCY) begin
+                ddr_occ_q <= ddr_occ_q + cells_ext;
+              end
+              if (!ddr_min_valid || rank_less(op_rank_p, op_seq_p, ddr_min_rank, ddr_min_seq)) begin
                 ddr_min_valid <= 1'b1;
-                ddr_min_rank <= op_rank_eff;
-                ddr_min_seq <= op_seq_eff;
-                ddr_min_desc <= op_desc_eff;
-                ddr_min_cell_count <= op_cell_count_eff;
-                ddr_min_batch_id <= op_batch_id_eff;
-                ddr_min_batch_off <= op_batch_off_eff;
+                ddr_min_rank <= op_rank_p;
+                ddr_min_seq <= op_seq_p;
+                ddr_min_desc <= op_desc_p;
+                ddr_min_cell_count <= op_cell_count_p;
+                ddr_min_batch_id <= op_batch_id_p;
+                ddr_min_batch_off <= op_batch_off_p;
               end
             end
           end
           3'd2: begin
-            if (sram_occ_q > cells_ext) begin
-              sram_occ_q <= sram_occ_q - cells_ext;
-            end else begin
-              sram_occ_q <= '0;
+            if (TRACK_OCCUPANCY) begin
+              if (sram_occ_q > cells_ext) begin
+                sram_occ_q <= sram_occ_q - cells_ext;
+              end else begin
+                sram_occ_q <= '0;
+              end
             end
             sram_min_valid <= |sram_l1_q;
             sram_min_rank <= {sram_l1_min_idx_q, sram_l2_min_idx_q};
             sram_min_seq <= sram_min_seq + 1'b1;
-            sram_min_cell_count <= op_cell_count_eff;
+            sram_min_cell_count <= op_cell_count_p;
           end
           3'd3: begin
-            if (sram_occ_q > cells_ext) begin
-              sram_occ_q <= sram_occ_q - cells_ext;
-            end else begin
-              sram_occ_q <= '0;
+            if (TRACK_OCCUPANCY) begin
+              if (sram_occ_q > cells_ext) begin
+                sram_occ_q <= sram_occ_q - cells_ext;
+              end else begin
+                sram_occ_q <= '0;
+              end
             end
-            sram_max_valid <= |sram_l1_q;
-            sram_max_rank <= {sram_l1_max_idx_q, sram_l2_max_idx_q};
-            sram_max_seq <= sram_max_seq - 1'b1;
-            sram_max_cell_count <= op_cell_count_eff;
+            if (TRACK_SRAM_MAX) begin
+              sram_max_valid <= |sram_l1_q;
+              sram_max_rank <= {sram_l1_max_idx_q, sram_l2_max_idx_q};
+              sram_max_seq <= sram_max_seq - 1'b1;
+              sram_max_cell_count <= op_cell_count_p;
+            end
           end
           3'd4: begin
-            if (ddr_occ_q > cells_ext) begin
-              ddr_occ_q <= ddr_occ_q - cells_ext;
-            end else begin
-              ddr_occ_q <= '0;
-            end
-            if (sram_occ_q != {OCC_WIDTH{1'b1}}) begin
-              sram_occ_q <= sram_occ_q + cells_ext;
+            if (TRACK_OCCUPANCY) begin
+              if (ddr_occ_q > cells_ext) begin
+                ddr_occ_q <= ddr_occ_q - cells_ext;
+              end else begin
+                ddr_occ_q <= '0;
+              end
+              if (sram_occ_q != {OCC_WIDTH{1'b1}}) begin
+                sram_occ_q <= sram_occ_q + cells_ext;
+              end
             end
             sram_l1_q[l1_idx] <= 1'b1;
             sram_l2_shadow_q[l2_idx] <= 1'b1;
             ddr_min_valid <= |ddr_l1_q;
-            sram_min_cell_count <= op_cell_count_eff;
+            sram_min_cell_count <= op_cell_count_p;
           end
           3'd5: begin
-            if (sram_occ_q > cells_ext) begin
-              sram_occ_q <= sram_occ_q - cells_ext;
-            end else begin
-              sram_occ_q <= '0;
+            if (TRACK_OCCUPANCY) begin
+              if (sram_occ_q > cells_ext) begin
+                sram_occ_q <= sram_occ_q - cells_ext;
+              end else begin
+                sram_occ_q <= '0;
+              end
+              ddr_occ_q <= ddr_occ_q + cells_ext;
             end
-            ddr_occ_q <= ddr_occ_q + cells_ext;
             ddr_l1_q[l1_idx] <= 1'b1;
             ddr_l2_shadow_q[l2_idx] <= 1'b1;
             ddr_min_valid <= 1'b1;
-            ddr_min_rank <= op_rank_eff;
-            ddr_min_seq <= op_seq_eff;
-            ddr_min_desc <= op_desc_eff;
-            ddr_min_cell_count <= op_cell_count_eff;
-            ddr_min_batch_id <= op_batch_id_eff;
-            ddr_min_batch_off <= op_batch_off_eff;
+            ddr_min_rank <= op_rank_p;
+            ddr_min_seq <= op_seq_p;
+            ddr_min_desc <= op_desc_p;
+            ddr_min_cell_count <= op_cell_count_p;
+            ddr_min_batch_id <= op_batch_id_p;
+            ddr_min_batch_off <= op_batch_off_p;
           end
           default: begin
             if (ENABLE_DIGEST) begin
@@ -401,8 +575,6 @@ module hestia_paper_scale_port_queue #(
                   {{(64-RANK_WIDTH){1'b0}}, sram_min_rank} ^
                   {{(64-RANK_WIDTH){1'b0}}, ddr_min_rank} ^
                   {{(64-OCC_WIDTH){1'b0}}, sram_occ_q};
-      end else begin
-        digest <= '0;
       end
     end
   end
